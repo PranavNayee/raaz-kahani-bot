@@ -15,9 +15,9 @@ FALLBACK_METRICS = ["reach", "likes", "comments", "shares", "saved"]
 
 
 def _get(path, **params):
-    from instagram import GRAPH, _check
+    from instagram import graph, _check
     params["access_token"] = C.IG_ACCESS_TOKEN()
-    return _check(requests.get(f"{GRAPH}/{path}", params=params, timeout=60))
+    return _check(requests.get(f"{graph()}/{path}", params=params, timeout=60))
 
 
 def media_insights(mid):
@@ -130,8 +130,8 @@ def _write_reply(h, user, text):
 
 
 def _ig_reply(cid, message):
-    from instagram import GRAPH, _check
-    _check(requests.post(f"{GRAPH}/{cid}/replies", data={"message": message, "access_token": C.IG_ACCESS_TOKEN()},
+    from instagram import graph, _check
+    _check(requests.post(f"{graph()}/{cid}/replies", data={"message": message, "access_token": C.IG_ACCESS_TOKEN()},
                          timeout=60))
 
 

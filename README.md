@@ -70,6 +70,12 @@ The code style, config pattern, scheduling, slot lock, storage and Telegram flow
 3. Your IG user id: `GET /me/accounts?fields=instagram_business_account` in the Explorer.
 4. The token lasts **60 days**. `check.py` reports the days left, and the daily run warns in Telegram 10 days
    before expiry. Repeat steps 1–2 to renew it.
+5. Alternative without a Facebook Page: in your Meta app → Use cases → Instagram API → *API setup with Unified
+   login* → *Generate token* next to the account. Both token kinds work: `EAA…` tokens use graph.facebook.com,
+   `IG…` tokens use graph.instagram.com (picked automatically, or force it with the variable `IG_GRAPH_HOST`).
+6. When Meta won't report a token's expiry, the bot estimates it from the variable **`IG_TOKEN_SET`**
+   (`YYYY-MM-DD`, the day you saved the token). Update it whenever you save a new token:
+   `gh variable set IG_TOKEN_SET --body 2026-11-15`.
 
 **YouTube (`YT_CLIENT_ID`, `YT_CLIENT_SECRET`, `YT_REFRESH_TOKEN`)**
 1. Google Cloud → OAuth consent screen (External, add yourself as a test user, then **Publish app**) →

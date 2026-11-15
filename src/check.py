@@ -113,7 +113,8 @@ def c_ig():
     import instagram
     user = instagram.check_token()
     days = instagram.token_days_left()
-    left = f", token expires in {days:.0f} days" if days is not None else ", token does not expire"
+    left = (f", token expires in {days:.0f} days" if days is not None else
+            ", token expiry unknown (set the variable IG_TOKEN_SET=YYYY-MM-DD when you save a new token)")
     if days is not None and days < 7:
         raise RuntimeError(f"token for @{user} expires in {days:.1f} days - renew it now (README)")
     scopes = instagram.token_scopes()
