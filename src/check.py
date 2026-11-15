@@ -100,11 +100,13 @@ def c_storage():
 
 
 def c_voice():
-    import voice, story
+    import tts, story
     d = tempfile.mkdtemp()
     s = story.sample()
-    (p, dur, words), = voice.speak_scenes(s["scenes"][:1], s, d)
-    return f"voice OK via {voice.LAST} ({dur:.1f}s, {len(words)} timed words, {C.VOICE_MALE}/{C.VOICE_FEMALE})"
+    (p, dur, words), = tts.speak_scenes(s["scenes"][:1], s, d)
+    who = f"{C.GEMINI_VOICE}/{C.GEMINI_VOICE_FEMALE}" if tts.LAST == "gemini" else f"{C.VOICE_MALE}/{C.VOICE_FEMALE}"
+    warn = " - ⚠️ robotic fallback voice, Gemini TTS unavailable" if tts.LAST == "edge" and tts.order()[0] != "edge" else ""
+    return f"voice OK via {tts.LAST} ({dur:.1f}s, {len(words)} timed words, voices {who}){warn}"
 
 
 def c_ig():

@@ -5,7 +5,7 @@ video is already made/posted and exits in seconds. A dry run renders and sends t
 leaves story.json, video.mp4, cover.jpg, caption.txt and yt_meta.json in work/."""
 import json, os, shutil, sys, time
 import config as C
-import story as S, images, voice, render, covers, captions, storage, notify, slots, publisher
+import story as S, images, voice, tts, render, covers, captions, storage, notify, slots, publisher
 from util import log, truthy
 
 WORK = os.environ.get("WORK_DIR", "work")
@@ -31,11 +31,15 @@ def produce(vs, work=WORK, seq=0):
     os.makedirs(work, exist_ok=True)
     with open(os.path.join(work, "story.json"), "w", encoding="utf-8") as f:
         json.dump(vs, f, ensure_ascii=False, indent=2)
-    step(f"images ({len(vs['scenes'])} scenes)")
-    imgs = images.make_all(vs, os.path.join(work, "images"))
+    step(f"images + voice in parallel ({len(vs['scenes'])} scenes)")
+    import concurrent.futures
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:      # voice never waits for the pictures
+        f_img = ex.submit(images.make_all, vs, os.path.join(work, "images"))
+        f_voice = ex.submit(tts.speak_scenes, vs["scenes"], vs, work)
+        voices = f_voice.result()
+        log(f"🗣️ voice ready ({tts.LAST}) - waiting for the pictures")
+        imgs = f_img.result()
     provs = [i["provider"] for i in imgs]
-    step("voice")
-    voices = voice.speak_scenes(vs["scenes"], vs, work)
     overhead = render.ENDCARD + render.GAP * len(voices)
     voices = voice.fit_tempo(voices, C.MAX_SECONDS - overhead)
     step("render")
@@ -53,7 +57,7 @@ def produce(vs, work=WORK, seq=0):
         json.dump(ytm, f, ensure_ascii=False, indent=2)
     meta.pop("words_timed", None)
     return {"video": video, "cover": cover, "cover_scene": cover_scene, "caption": caption, "yt_meta": ytm,
-            "meta": meta, "providers": provs, "voice": voice.LAST}
+            "meta": meta, "providers": provs, "voice": tts.LAST}
 
 
 def choose(history, dry):

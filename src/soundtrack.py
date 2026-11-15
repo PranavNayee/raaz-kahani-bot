@@ -127,7 +127,7 @@ def boom(sr=SR, dur=1.4):
 
 
 def build(voice_clips, starts, total, out_wav, music=True, music_dir=None, voice_af=None, whoosh_at=(), boom_at=(),
-          seed=7, lift_at=None):
+          seed=7, lift_at=None, ambience=(), hits=()):
     """voice_clips: audio paths; starts: start second of each clip; total: video length. Writes a mono wav."""
     n = int(round(total * SR))
     voice = np.zeros(n, dtype=np.float32)
@@ -138,13 +138,25 @@ def build(voice_clips, starts, total, out_wav, music=True, music_dir=None, voice
         if e > s:
             voice[s:e] += x[:e - s]
     mix = voice.copy()
-    if music:
-        bed = _music(total, music_dir, seed, lift_at)
-        bed = np.pad(bed, (0, max(0, n - len(bed))))[:n]
+    bed = _music(total, music_dir, seed, lift_at) if music else np.zeros(n, np.float32)
+    bed = np.pad(bed, (0, max(0, n - len(bed))))[:n]
+    for st, x in ambience:                                                # night/wind/rain/heartbeat beds
+        a = int(st * SR); e = min(n, a + len(x))
+        if e > a:
+            fade = min(int(0.3 * SR), (e - a) // 2)
+            x = x[:e - a].copy()
+            if fade:
+                x[:fade] *= np.linspace(0, 1, fade, dtype=np.float32); x[-fade:] *= np.linspace(1, 0, fade, dtype=np.float32)
+            bed[a:e] += x
+    if music or ambience:
         env = _smooth(np.abs(voice), int(0.25 * SR))
         env = env / (np.percentile(env[env > 1e-4], 90) + 1e-6) if np.any(env > 1e-4) else env
         duck = 1.0 - 0.7 * np.clip(env, 0, 1)                             # music dips while the narrator talks
         mix += bed * duck
+    for st, x in hits:                                                    # one-shot effects on top
+        a = int(max(0.0, st) * SR); e = min(n, a + len(x))
+        if e > a:
+            mix[a:e] += x[:e - a]
     w, b = whoosh(), boom()
     for st in whoosh_at:
         a = int(max(0.0, st - 0.35) * SR); e = min(n, a + len(w))
@@ -184,3 +196,166 @@ def measure(path):
         return float(m.group(1)) if m else None
     except ValueError:
         return None
+
+
+# ---------------------------------------------------------------- sound effects (all generated here: royalty-free)
+def _noise(n, seed=0):
+    return np.random.default_rng(seed).standard_normal(n).astype(np.float32)
+
+
+def _band(x, lo, hi, sr=SR):
+    spec = np.fft.rfft(x)
+    f = np.fft.rfftfreq(len(x), 1 / sr)
+    spec[(f < lo) | (f > hi)] = 0
+    return np.fft.irfft(spec, len(x)).astype(np.float32)
+
+
+def _norm(x, peak):
+    return (peak * x / (np.max(np.abs(x)) + 1e-6)).astype(np.float32)
+
+
+def crickets(dur, sr=SR, seed=11):
+    """Night ambience: soft chirp trains at ~4.6 kHz."""
+    n = int(dur * sr); out = np.zeros(n, np.float32); rng = np.random.default_rng(seed)
+    t = 0.0
+    while t < dur:
+        f = 4300 + rng.uniform(0, 700)
+        for k in range(rng.integers(2, 5)):
+            st = int((t + k * 0.055) * sr); ln = int(0.03 * sr)
+            if st + ln >= n:
+                break
+            tt = np.arange(ln, dtype=np.float32) / sr
+            out[st:st + ln] += np.sin(2 * np.pi * f * tt) * np.sin(np.pi * tt / 0.03)
+        t += rng.uniform(0.35, 0.9)
+    return _norm(out, 0.035)
+
+
+def wind(dur, sr=SR, seed=12):
+    n = int(dur * sr)
+    x = _band(_noise(n, seed), 150, 900, sr)
+    t = np.arange(n, dtype=np.float32) / sr
+    lfo = 0.55 + 0.45 * np.sin(2 * np.pi * 0.13 * t + 1.0) * np.sin(2 * np.pi * 0.05 * t)
+    return _norm(x * lfo, 0.07)
+
+
+def rain(dur, sr=SR, seed=13):
+    n = int(dur * sr)
+    x = _band(_noise(n, seed), 1500, 9000, sr) * 0.6
+    rng = np.random.default_rng(seed)
+    for st in rng.integers(0, max(1, n - 800), int(dur * 25)):
+        x[st:st + 600] += _noise(600, int(st)) * np.exp(-np.arange(600) / 90) * 0.8
+    return _norm(x, 0.08)
+
+
+def heartbeat(dur, bpm=72, sr=SR):
+    n = int(dur * sr); out = np.zeros(n, np.float32)
+    beat = 60.0 / bpm
+    def thump(gain):
+        ln = int(0.18 * sr); tt = np.arange(ln, dtype=np.float32) / sr
+        return gain * np.sin(2 * np.pi * (55 + 25 * np.exp(-tt * 30)) * tt) * np.exp(-tt * 22)
+    t = 0.2
+    while t < dur - 0.4:
+        for off, g in ((0.0, 1.0), (0.24, 0.7)):
+            st = int((t + off) * sr); th = thump(g)
+            e = min(n, st + len(th)); out[st:e] += th[:e - st]
+        t += beat
+    return _norm(out, 0.22)
+
+
+def riser(dur=2.2, sr=SR, seed=14):
+    """Tension build that peaks right at the twist."""
+    n = int(dur * sr); t = np.arange(n, dtype=np.float32) / sr
+    sweep = np.sin(2 * np.pi * np.cumsum(200 + 1400 * (t / dur) ** 2) / sr)
+    x = 0.6 * sweep + _band(_noise(n, seed), 800, 6000, sr) * 0.5
+    return _norm(x * (t / dur) ** 2.2, 0.16)
+
+
+def hit(sr=SR):
+    """Short cinematic impact (hook, shocks)."""
+    b = boom(sr, 0.9)
+    n = int(0.25 * sr)
+    b[:n] += _band(_noise(n, 15), 200, 5000, sr) * np.exp(-np.arange(n, dtype=np.float32) / (0.04 * sr)) * 0.5
+    return _norm(b, 0.3)
+
+
+def chime(sr=SR, seed=16):
+    """Magical sparkle for happy / warm moments."""
+    rng = np.random.default_rng(seed); n = int(1.8 * sr); out = np.zeros(n, np.float32)
+    for k, f in enumerate((1568, 1976, 2349, 3136)):
+        st = int(k * 0.09 * sr); tt = np.arange(n - st, dtype=np.float32) / sr
+        out[st:] += np.sin(2 * np.pi * f * tt * (1 + rng.uniform(-0.002, 0.002))) * np.exp(-tt * 3.2)
+    return _norm(out, 0.09)
+
+
+def bell(sr=SR):
+    n = int(3.0 * sr); tt = np.arange(n, dtype=np.float32) / sr
+    x = sum(a * np.sin(2 * np.pi * f * tt) * np.exp(-tt * d) for f, a, d in
+            ((392, 1.0, 1.1), (784, 0.5, 1.6), (1046, 0.35, 2.2), (1371, 0.25, 2.8), (1960, 0.12, 3.5)))
+    return _norm(x, 0.14)
+
+
+def thunder(sr=SR, seed=17):
+    n = int(3.0 * sr); tt = np.arange(n, dtype=np.float32) / sr
+    x = _band(_noise(n, seed), 30, 260, sr) * (np.exp(-tt * 1.3) + 0.6 * np.exp(-((tt - 0.5) ** 2) / 0.05))
+    return _norm(x, 0.3)
+
+
+def footsteps(count=4, gap=0.48, sr=SR):
+    n = int((count * gap + 0.4) * sr); out = np.zeros(n, np.float32)
+    for k in range(count):
+        st = int(k * gap * sr); ln = int(0.12 * sr); tt = np.arange(ln, dtype=np.float32) / sr
+        out[st:st + ln] += (_band(_noise(ln, 20 + k), 80, 700, sr) * np.exp(-tt * 40) + 
+                            0.6 * np.sin(2 * np.pi * 70 * tt) * np.exp(-tt * 30))
+    return _norm(out, 0.12)
+
+
+def creak(sr=SR):
+    n = int(1.3 * sr); tt = np.arange(n, dtype=np.float32) / sr
+    f = 180 + 120 * np.sin(2 * np.pi * 0.6 * tt) + 40 * np.sin(2 * np.pi * 7 * tt)
+    x = np.sign(np.sin(2 * np.pi * np.cumsum(f) / sr)) * (0.5 + 0.5 * np.sin(2 * np.pi * 23 * tt))
+    return _norm(_band(x, 200, 3000, sr) * np.sin(np.pi * tt / 1.3), 0.06)
+
+
+KEYWORD_SFX = [  # (pattern over narration + image prompt, kind)
+    (r"rain|बारिश|बरसात|बूँद", "rain"), (r"thunder|lightning|storm|बिजली|तूफ़ान|तूफान|गरज", "thunder"),
+    (r"\bbells?\b|ghanti|घंटी|घंटा", "bell"), (r"\bdoors?\b|darwaz|दरवाज़|दरवाज", "creak"),
+    (r"footstep|walking|sneak|कदम|चुपके", "steps"), (r"\bwind\b|storm|हवा|आँधी|आंधी", "wind"),
+    (r"night|moon|dark|रात|चाँद|चांद|अंधेर|पूर्णिमा", "crickets"),
+]
+
+
+def plan_sfx(scenes, tl, twist_t, story_end):
+    """Which sounds go where. Returns (ambience, hits): lists of (start_seconds, samples).
+    Ambience sits under the music and is ducked with it; hits are added on top."""
+    import re as _re
+    amb, hits = [], [(0.0, hit())]                              # the hook lands with an impact
+    for i, (sc, (st, d)) in enumerate(zip(scenes, tl)):
+        txt = (sc.get("narration_hi", "") + " " + sc.get("image_prompt", "")).lower()
+        kinds = {k for pat, k in KEYWORD_SFX if _re.search(pat, txt)}
+        emo = sc.get("emotion")
+        if "rain" in kinds:
+            amb.append((st, rain(d)))
+        if "wind" in kinds or emo == "eerie":
+            amb.append((st, wind(d)))
+        if "crickets" in kinds and "rain" not in kinds:
+            amb.append((st, crickets(d)))
+        if emo in ("tense", "fear"):
+            amb.append((st, heartbeat(d, 80 if emo == "fear" else 70)))
+        if "thunder" in kinds:
+            hits.append((st + 0.2, thunder()))
+        if "bell" in kinds:
+            hits.append((st + 0.3, bell()))
+        if "creak" in kinds:
+            hits.append((st + 0.4, creak()))
+        if "steps" in kinds:
+            hits.append((st + 0.5, footsteps()))
+        if emo in ("joy", "triumph", "warm", "hopeful"):
+            hits.append((st + 0.1, chime()))
+        if emo == "shock" and i > 0 and st != twist_t:
+            hits.append((st, hit() * 0.7))
+        if i > 0 and st != twist_t:
+            hits.append((max(0.0, st - 0.3), whoosh() * 0.55))     # soft whoosh on every cut
+    if twist_t:
+        r = riser()
+        hits.append((max(0.0, twist_t - len(r) / SR), r))
+    return amb, hits

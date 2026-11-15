@@ -217,11 +217,95 @@ def camera(move, p, punch=0.0):
     return z, cx, cy
 
 
-def shot(src, move, p, punch=0.0):
+def shot(src, move, p, punch=0.0, dx=0.0, dy=0.0):
     z, cx, cy = camera(move, p, punch)
+    hx, hy = W / (2 * z), H / (2 * z)
+    cx, cy = min(max(cx + dx, hx), W - hx), min(max(cy + dy, hy), H - hy)
     hw, hh = W / (2 * z) * SRC_SCALE, H / (2 * z) * SRC_SCALE
     box = (cx * SRC_SCALE - hw, cy * SRC_SCALE - hh, cx * SRC_SCALE + hw, cy * SRC_SCALE + hh)
     return src.transform((W, H), Image.EXTENT, box, Image.BILINEAR)
+
+
+# ---------------------------------------------------------------- animation layers
+SHAKE_EMO = {"shock", "fear"}
+FLICKER_EMO = {"eerie", "fear"}
+RAIN_RE = re.compile(r"rain|बारिश|बरसात")
+
+
+def particle_kind(sc):
+    txt = (sc.get("narration_hi", "") + " " + sc.get("image_prompt", "")).lower()
+    emo = sc.get("emotion")
+    if RAIN_RE.search(txt):
+        return "rain"
+    if emo in ("joy", "triumph", "warm", "hopeful"):
+        return "sparkle"
+    if emo in ("eerie", "fear", "tense", "shock", "sad"):
+        return "mist"
+    return "fireflies"
+
+
+def _rand(seed, k):
+    """Deterministic pseudo-random numbers in [0, 1) - identical in every render worker."""
+    return np.random.default_rng(seed).random(k)
+
+
+def draw_particles(frame, kind, t, seed):
+    d = ImageDraw.Draw(frame, "RGBA")
+    if kind == "rain":
+        r = _rand(seed, 3 * 70).reshape(70, 3)
+        for x0, y0, sp in r:
+            y = (y0 * (H + 200) + t * (1500 + 900 * sp)) % (H + 200) - 100
+            x = (x0 * W + y * 0.12) % W
+            d.line((x, y, x - 10, y - 60 - 40 * sp), fill=(200, 215, 255, 70), width=3)
+        return
+    n = {"fireflies": 26, "sparkle": 34, "mist": 22}[kind]
+    r = _rand(seed, 5 * n).reshape(n, 5)
+    for x0, y0, sz, ph, sp in r:
+        if kind == "mist":                                       # slow drifting dust motes
+            x = (x0 * W + 25 * t * (sp - 0.5)) % W
+            y = (y0 * H - 18 * t * (0.3 + sp)) % H
+            rad, col, a = 2 + 3 * sz, (210, 220, 255), int(60 + 50 * np.sin(t * 1.5 + ph * 6))
+        else:
+            x = (x0 * W + 40 * np.sin(t * (0.4 + sp) + ph * 6)) % W
+            y = (y0 * H - (30 + 50 * sp) * t) % H
+            tw = 0.5 + 0.5 * np.sin(t * (2 + 3 * sp) + ph * 6)
+            if kind == "fireflies":
+                rad, col, a = 3 + 4 * sz, (255, 214, 120), int(40 + 200 * tw)
+            else:
+                rad, col, a = 2 + 4 * sz, (255, 245, 200), int(30 + 220 * tw ** 3)
+        if a <= 8:
+            continue
+        g = rad * 3.2
+        d.ellipse((x - g, y - g, x + g, y + g), fill=col + (max(0, a // 6),))
+        d.ellipse((x - rad, y - rad, x + rad, y + rad), fill=col + (min(255, a),))
+
+
+def fog_layer(seed):
+    """A soft fog band (RGBA) that drifts across eerie scenes."""
+    rng = np.random.default_rng(seed)
+    small = (rng.random((24, 60)) * 255).astype(np.uint8)
+    fog = Image.fromarray(small, "L").resize((int(W * 1.6), 620), Image.BICUBIC).filter(ImageFilter.GaussianBlur(40))
+    a = np.asarray(fog, np.float32)
+    yy = np.linspace(0, np.pi, a.shape[0], dtype=np.float32)[:, None]
+    a = (a * np.sin(yy) * 0.42).astype(np.uint8)
+    layer = Image.new("RGBA", fog.size, (200, 210, 235, 0))
+    layer.putalpha(Image.fromarray(a, "L"))
+    return layer
+
+
+def flicker(t, seed):
+    """0..0.35 darkening blips (a candle / lantern struggling) for eerie scenes."""
+    k = int(t * 12)
+    r = np.random.default_rng(seed * 1000 + k).random()
+    return 0.0 if r > 0.18 else 0.12 + 0.23 * np.random.default_rng(seed * 7000 + k).random()
+
+
+def shake(t0, seed):
+    """Camera shake (dx, dy) during the first 0.6 s of a shock/fear scene."""
+    if t0 >= 0.6:
+        return 0.0, 0.0
+    amp = 16 * (1 - t0 / 0.6) ** 2
+    return amp * np.sin(t0 * 71 + seed), amp * np.cos(t0 * 53 + seed * 2)
 
 
 # ---------------------------------------------------------------- main
@@ -234,8 +318,127 @@ def timeline(voices):
     return out, t
 
 
+class Frames:
+    """Draws any frame of the video from a picklable plan (so worker processes can render chunks in parallel)."""
+
+    def __init__(self, plan):
+        self.p = plan
+        self.srcs = {}
+        self.mask = vignette_mask()
+        self.black = Image.new("RGB", (W, H), (0, 0, 0))
+        self.white = Image.new("RGB", (W, H), (255, 255, 255))
+        hook = hook_overlay(plan["hook"], plan["badge"])
+        self.hook_a, self.hook_rgb = hook.getchannel("A"), hook.convert("RGB")
+        self.card = end_card(shot(self.src(len(plan["tl"]) - 1), plan["moves"][-1], 1.0), plan["end_card"], plan["vs"])
+        self.caps = CaptionCache()
+        self.fog = fog_layer(plan["seed"]) if "mist" in plan["particles"] else None
+        self.gi = 0
+        self.cap_frames = 0
+
+    def src(self, i):
+        if i not in self.srcs:
+            if len(self.srcs) > 4:                               # keep memory small: scenes come in order
+                self.srcs.pop(min(self.srcs))
+            img = Image.open(self.p["images"][i]).convert("RGB")
+            if img.size != (W, H):
+                from images import cover_fit
+                img = cover_fit(img)
+            self.srcs[i] = img.resize((int(W * SRC_SCALE), int(H * SRC_SCALE)), Image.BICUBIC)
+        return self.srcs[i]
+
+    def scene(self, i, t):
+        p = self.p
+        st, d = p["tl"][i]
+        t0 = t - st
+        punch = 0.05 * (1 - t0 / 0.5) if (p["twist_i"] == i and 0 <= t0 < 0.5) else \
+            (0.025 * (1 - t0 / 0.35) if (i > 0 and 0 <= t0 < 0.35) else 0.0)    # beat punch on every cut
+        dx, dy = shake(t0, i) if p["emotions"][i] in SHAKE_EMO and t0 >= 0 else (0.0, 0.0)
+        if (dx or dy) and t0 < 0.6:
+            punch = max(punch, 0.035 * (1 - t0 / 0.6))           # room for the shake at the frame edges
+        return shot(self.src(i), p["moves"][i], t0 / d, punch, dx, dy)
+
+    def frame(self, f):
+        p = self.p
+        t = f / FPS
+        tl, story_end = p["tl"], p["story_end"]
+        if t >= story_end:                                          # end card (fades in)
+            k = min(1.0, (t - story_end) / 0.4)
+            frame = self.card.copy() if k >= 1 else Image.blend(self.scene(len(tl) - 1, t), self.card, k)
+            draw_particles(frame, "sparkle", t, p["seed"] + 99)
+            return frame
+        i = max(j for j, (st, _) in enumerate(tl) if st <= t + 1e-9)
+        frame = self.scene(i, t)
+        nxt, twist_i = i + 1, p["twist_i"]
+        if nxt < len(tl) and nxt != twist_i and t > tl[nxt][0] - XFADE / 2:
+            frame = Image.blend(frame, self.scene(nxt, t), (t - (tl[nxt][0] - XFADE / 2)) / XFADE)
+        elif i > 0 and i != twist_i and t < tl[i][0] + XFADE / 2:
+            frame = Image.blend(self.scene(i - 1, t), frame, 0.5 + (t - tl[i][0]) / XFADE)
+        kind = p["particles"][i]
+        if kind == "mist" and self.fog is not None:                 # drifting fog band low in the frame
+            x = int(-((t * 30) % (self.fog.width - W)))
+            frame.paste(self.fog, (x, 1180), self.fog)
+        draw_particles(frame, kind, t, p["seed"] + i)
+        if p["emotions"][i] in FLICKER_EMO:
+            a = flicker(t, p["seed"] + i)
+            if a:
+                frame = Image.blend(frame, self.black, a)
+        if twist_i == i:
+            fi = int(round((t - tl[i][0]) * FPS))
+            if 0 <= fi < len(FLASH):
+                frame = Image.blend(frame, self.white, FLASH[fi])
+        frame = Image.composite(frame, self.black, self.mask)
+        if t < HOOK_T:                                              # hook text: pops in, fades out
+            a = min(1.0, t / 0.15, (HOOK_T - t) / 0.35)
+            frame.paste(self.hook_rgb, (0, 0), self.hook_a if a >= 1 else self.hook_a.point(lambda v, a=a: int(v * a)))
+            return frame
+        groups = p["groups"]
+        while self.gi < len(groups) - 1 and t >= groups[self.gi + 1][0]:
+            self.gi += 1
+        if groups:
+            g0, g1, g = groups[self.gi]
+            if g0 <= t < g1:
+                active = next((k for k, w in enumerate(g) if w[0] - 0.03 <= t < (g[k + 1][0] if k + 1 < len(g) else w[1] + 0.3)), -1)
+                cap = self.caps.get(self.gi, g, active)
+                age = t - g0
+                if age < 0.14:                                      # caption pop: 80% -> 106% -> 100%
+                    sc = 0.8 + 0.26 * (age / 0.1) if age < 0.1 else 1.06 - 0.06 * ((age - 0.1) / 0.04)
+                    cw, ch = int(W * sc), int(200 * sc)
+                    cap = cap.resize((cw, ch), Image.BILINEAR)
+                    frame.paste(cap, ((W - cw) // 2, CAP_Y - ch // 2), cap)
+                else:
+                    frame.paste(cap, (0, CAP_Y - 100), cap)
+                self.cap_frames += 1
+        return frame
+
+
+ENC = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-maxrate", "9M", "-bufsize", "18M",
+       "-profile:v", "high", "-pix_fmt", "yuv420p", "-g", "60", "-r", str(FPS)]
+
+
+def render_chunk(plan, f0, f1, out):
+    """Renders frames [f0, f1) to a silent H.264 segment. Runs in a worker process."""
+    fr = Frames(plan)
+    cmd = ["ffmpeg", "-y", "-v", "error", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{W}x{H}", "-r", str(FPS),
+           "-i", "-", *ENC, "-an", out]
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+    try:
+        for f in range(f0, f1):
+            proc.stdin.write(fr.frame(f).tobytes())
+        proc.stdin.close()
+    except BrokenPipeError:
+        pass
+    if proc.wait() != 0:
+        raise RuntimeError(f"ffmpeg encode failed for frames {f0}-{f1}")
+    return fr.cap_frames
+
+
+def workers():
+    want = int(os.environ.get("RENDER_WORKERS", "0") or 0)
+    return max(1, want or min(4, os.cpu_count() or 1))
+
+
 def render(vs, images, voices, work, out_path, music=None):
-    """vs: a video story from story.make_parts(); images: images.make_all(); voices: voice.speak_scenes().
+    """vs: a video story from story.make_parts(); images: images.make_all(); voices: tts.speak_scenes().
     Returns metadata about the render (duration, frames, captions...)."""
     check_shaping()
     music = C.MUSIC if music is None else music
@@ -245,93 +448,56 @@ def render(vs, images, voices, work, out_path, music=None):
     tw = vs.get("twist_scene")
     twist_i = (tw - 1) if tw and 1 <= tw <= len(scenes) else None
     twist_t = tl[twist_i][0] if twist_i is not None else None
-
-    words = [(st + a, st + b, w) for (st, _), (_, _, ws) in zip(tl, voices) for a, b, w in ws]
+    words = [(st + float(a), st + float(b), w) for (st, _), (_, _, ws) in zip(tl, voices) for a, b, w in ws]
     groups = caption_groups(words, [(st, st + d) for st, d in tl])
 
-    log(f"🎵 Soundtrack: {len(voices)} clips, {total:.1f}s")
+    log(f"🎵 Soundtrack: {len(voices)} clips, {total:.1f}s, music + sound effects")
     mix, norm = os.path.join(work, "mix.wav"), os.path.join(work, "mix_norm.wav")
+    amb, hits = soundtrack.plan_sfx(scenes, tl, twist_t, story_end)
     soundtrack.build([v[0] for v in voices], [s for s, _ in tl], total, mix, music=music,
-                     voice_af=C.VOICE_FILTER if C.VOICE_FX and not C.OFFLINE else None,
+                     voice_af=C.VOICE_FILTER if C.VOICE_FX and not C.OFFLINE and soundtrack_voice_is_edge() else None,
                      whoosh_at=[t for t in (twist_t, story_end) if t], boom_at=[twist_t] if twist_t else [],
-                     seed=int(vs.get("seed", 7)) % 1000, lift_at=twist_t)
+                     seed=int(vs.get("seed", 7)) % 1000, lift_at=twist_t, ambience=amb, hits=hits)
     lufs = soundtrack.loudnorm(mix, norm)
-    log(f"   loudness {lufs} LUFS (target {C.TARGET_LUFS})")
+    log(f"   {len(amb)} ambience beds + {len(hits)} effects · loudness {lufs} LUFS (target {C.TARGET_LUFS})")
 
-    # scene sources (kept 20% larger for the camera) and moves
-    srcs, moves = [], []
-    for i, im in enumerate(images):
-        img = Image.open(im["path"]).convert("RGB")
-        if img.size != (W, H):
-            from images import cover_fit
-            img = cover_fit(img)
-        srcs.append(img.resize((int(W * SRC_SCALE), int(H * SRC_SCALE)), Image.BICUBIC))
-        moves.append("close" if im.get("reused") else MOVES[i % len(MOVES)])
-    mask = vignette_mask()
-    black = Image.new("RGB", (W, H), (0, 0, 0))
-    white = Image.new("RGB", (W, H), (255, 255, 255))
-    badge = {1: "PART 1", 2: "PART 2"}.get(vs.get("part"))
-    hook = hook_overlay(vs.get("hook") or vs["title"], badge)
-    hook_a, hook_rgb = hook.getchannel("A"), hook.convert("RGB")
-    last_img = shot(srcs[-1], moves[-1], 1.0)
-    card = end_card(last_img, vs.get("end_card", "cta"), vs)
-    caps = CaptionCache()
-
-    def scene_frame(i, t):
-        st, d = tl[i]
-        p = (t - st) / d
-        punch = 0.0
-        if twist_i == i and t - st < 0.5:
-            punch = 0.05 * (1 - (t - st) / 0.5)
-        return shot(srcs[i], moves[i], p, punch)
-
+    plan = {"images": [im["path"] for im in images],
+            "moves": ["close" if im.get("reused") else MOVES[i % len(MOVES)] for i, im in enumerate(images)],
+            "emotions": [sc.get("emotion") for sc in scenes], "particles": [particle_kind(sc) for sc in scenes],
+            "tl": tl, "story_end": story_end, "twist_i": twist_i, "groups": groups,
+            "hook": vs.get("hook") or vs["title"], "badge": {1: "PART 1", 2: "PART 2"}.get(vs.get("part")),
+            "end_card": vs.get("end_card", "cta"), "seed": int(vs.get("seed", 7)) % 10000,
+            "vs": {k: vs.get(k) for k in ("cta_question", "title")}}
     n = int(round(total * FPS))
-    cmd = ["ffmpeg", "-y", "-v", "error", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{W}x{H}", "-r", str(FPS),
-           "-i", "-", "-i", norm, "-map", "0:v", "-map", "1:a", "-c:v", "libx264", "-preset", "veryfast", "-crf", "21",
-           "-maxrate", "9M", "-bufsize", "18M", "-profile:v", "high", "-pix_fmt", "yuv420p", "-g", "60",
-           "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-movflags", "+faststart", "-shortest", out_path]
-    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
-    log(f"🖌️ Rendering {n} frames ({total:.1f}s, {len(scenes)} scenes, {len(groups)} caption groups)...")
-    gi, cap_frames = 0, 0
-    try:
-        for f in range(n):
-            t = f / FPS
-            if t >= story_end:                                          # end card (fades in)
-                k = min(1.0, (t - story_end) / 0.4)
-                frame = card if k >= 1 else Image.blend(scene_frame(len(scenes) - 1, t), card, k)
-            else:
-                i = max(j for j, (st, _) in enumerate(tl) if st <= t + 1e-9)
-                frame = scene_frame(i, t)
-                nxt = i + 1
-                # crossfade into the next scene (not into the twist: that is a hard cut + flash)
-                if nxt < len(tl) and nxt != twist_i and t > tl[nxt][0] - XFADE / 2:
-                    frame = Image.blend(frame, scene_frame(nxt, t), (t - (tl[nxt][0] - XFADE / 2)) / XFADE)
-                elif i > 0 and i != twist_i and t < tl[i][0] + XFADE / 2:
-                    frame = Image.blend(scene_frame(i - 1, t), frame, 0.5 + (t - tl[i][0]) / XFADE)
-                if twist_i == i:
-                    fi = int(round((t - tl[i][0]) * FPS))
-                    if 0 <= fi < len(FLASH):
-                        frame = Image.blend(frame, white, FLASH[fi])
-            frame = Image.composite(frame, black, mask)
-            if t < HOOK_T:                                              # hook text, fades out
-                a = min(1.0, t / 0.15, (HOOK_T - t) / 0.35)
-                frame.paste(hook_rgb, (0, 0), hook_a if a >= 1 else hook_a.point(lambda v, a=a: int(v * a)))
-            elif t < story_end:                                         # karaoke captions
-                while gi < len(groups) - 1 and t >= groups[gi + 1][0]:
-                    gi += 1
-                g0, g1, g = groups[gi] if groups else (0, 0, [])
-                if g and g0 <= t < g1:
-                    active = next((k for k, w in enumerate(g) if w[0] - 0.03 <= t < (g[k + 1][0] if k + 1 < len(g) else w[1] + 0.3)), -1)
-                    cap = caps.get(gi, g, active)
-                    frame.paste(cap, (0, CAP_Y - 100), cap)
-                    cap_frames += 1
-            proc.stdin.write(frame.tobytes())
-        proc.stdin.close()
-    except BrokenPipeError:
-        pass
-    if proc.wait() != 0:
-        raise RuntimeError("ffmpeg encode failed")
+    k = min(workers(), max(1, n // 300))
+    bounds = [round(n * j / k) for j in range(k + 1)]
+    segs = [os.path.join(work, f"seg_{j:02d}.mp4") for j in range(k)]
+    log(f"🖌️ Rendering {n} frames on {k} CPU core{'s' if k > 1 else ''} ({total:.1f}s, {len(scenes)} scenes, "
+        f"{len(groups)} caption groups)...")
+    if k == 1:
+        cap_frames = render_chunk(plan, 0, n, segs[0])
+    else:
+        import concurrent.futures, multiprocessing
+        ctx = multiprocessing.get_context("fork" if hasattr(os, "fork") and os.uname().sysname == "Linux" else "spawn")
+        with concurrent.futures.ProcessPoolExecutor(max_workers=k, mp_context=ctx) as ex:
+            cap_frames = sum(ex.map(render_chunk, [plan] * k, bounds[:-1], bounds[1:], segs))
+    lst = os.path.join(work, "segments.txt")
+    with open(lst, "w") as f:
+        f.writelines(f"file '{os.path.abspath(s)}'\n" for s in segs)
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", lst, "-i", norm,
+                    "-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
+                    "-movflags", "+faststart", "-shortest", out_path], check=True)
+    for s in segs:
+        os.remove(s)
     log(f"✅ Video {total:.1f}s, {os.path.getsize(out_path) / 1e6:.1f} MB")
     return {"duration": total, "frames": n, "caption_groups": len(groups), "caption_frames": cap_frames,
             "words": len(words), "timeline": tl, "twist_t": twist_t, "story_end": story_end, "lufs": lufs,
-            "raqm": RAQM, "words_timed": words}
+            "raqm": RAQM, "words_timed": words, "workers": k}
+
+
+def soundtrack_voice_is_edge():
+    try:
+        import tts
+        return tts.LAST in ("edge", "")
+    except Exception:
+        return True

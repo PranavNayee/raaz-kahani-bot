@@ -74,6 +74,12 @@ jobs:
           YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
           YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
           POLLINATIONS_TOKEN: ${{ secrets.POLLINATIONS_TOKEN }}
+          TTS_PROVIDER: ${{ vars.TTS_PROVIDER || 'auto' }}
+          GEMINI_VOICE: ${{ vars.GEMINI_VOICE || 'Charon' }}
+          GEMINI_VOICE_FEMALE: ${{ vars.GEMINI_VOICE_FEMALE || 'Kore' }}
+          VOICE_SPEED: ${{ vars.VOICE_SPEED || '1.1' }}
+          ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
+          ELEVENLABS_VOICE_ID: ${{ vars.ELEVENLABS_VOICE_ID }}
           POST_TIMES: ${{ vars.POST_TIMES || '19:00' }}
           TIMEZONE: ${{ vars.TIMEZONE || 'Asia/Kolkata' }}
           REVIEW_MODE: ${{ vars.REVIEW_MODE || 'auto_unless_skip' }}

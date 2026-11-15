@@ -15,8 +15,9 @@ story.py ─▶ images.py ─▶ voice.py ─▶ render.py (+ soundtrack.py) ─
 |---|---|---|
 | Story | `src/story.py` | LLM (Gemini → Groq fallback) writes strict JSON, validated by a schema + content checks, retried with the error fed back. 2 candidates; a second LLM pass scores hook / twist / clarity and keeps the best. Themes rotate (best performers favoured), premises never repeat, every 3rd story is a 2-part cliffhanger. |
 | Images | `src/images.py` | 1080×1920 per scene: Gemini image models (first good frame passed back as a character/style reference) → Pollinations (same seed) → drawn placeholder. Channel style bible + every character's visual bible prepended to every prompt, safety word filter, 3 tries, a failed scene reuses the previous good frame. |
-| Voice | `src/voice.py` | edge-tts `hi-IN-MadhurNeural` (or `hi-IN-SwaraNeural` for female-led stories), second voice for dialogue lines, word timings for captions. |
-| Edit | `src/render.py`, `src/soundtrack.py` | 30 fps Ken Burns, 0.3 s crossfades, a 5-frame flash + boom on the twist, big hook text in the first 2 s, word-by-word karaoke captions in Devanagari (Noto Sans Devanagari Bold) inside the safe area, music ducked under the voice, 2-pass loudness to −14 LUFS, "Part 2 kal!" end card. H.264 + AAC, faststart. |
+| Voice | `src/tts.py`, `src/voice.py` | **Gemini TTS** (free with `GEMINI_API_KEY`): voice *Charon* (male) or *Kore* (female-led stories), directed as a Hindi horror storyteller, the whole video in ONE request, sped up 1.1×. ElevenLabs if `ELEVENLABS_API_KEY` is set. Edge `hi-IN-MadhurNeural` is the free fallback for scheduled runs; manual "post now" runs refuse it (`STRICT_VOICE`). |
+| Sound | `src/soundtrack.py` | Mystery music bed (or your tracks in `assets/music`) ducked under the voice, plus generated royalty-free effects chosen per scene: night crickets, wind, rain, heartbeat on tense scenes, a riser into the twist, impacts, whooshes on cuts, chimes on happy moments, bells, thunder, footsteps and door creaks from the scene's words. 2-pass loudness to −14 LUFS. |
+| Edit | `src/render.py` | 30 fps Ken Burns, beat zoom-punch on every cut, camera shake on shocks, floating fireflies / dust / sparkles / rain, drifting fog and lantern flicker in eerie scenes, a flash on the twist, big hook text in the first 2 s, pop-in word-by-word karaoke captions in Devanagari inside the safe area, "Part 2 kal!" end card. Rendered in parallel chunks on every CPU core (`RENDER_WORKERS`), H.264 + AAC, faststart. |
 | Cover | `src/covers.py` | Most dramatic frame + title, kept inside the 3:4 profile-grid crop. |
 | Post | `src/publisher.py` | Instagram Graph API Reels (video from a public Supabase bucket) + YouTube Data API v3 resumable upload, playlists. |
 | Grow | `src/growth.py`, `src/weekly.py` | Insights from both platforms, Hindi replies to genuine comments (max 12/run), weekly Telegram report; winners feed back into the story writer. |
@@ -113,6 +114,9 @@ Settings → Secrets and variables → Actions.
 | `SERIES_EVERY` | `3` | every Nth story is a 2-part series (`0` = never) |
 | `MAX_SECONDS` | `150` | narration is sped up (max 1.25×) to fit |
 | `IMAGE_PROVIDERS` | `gemini,pollinations` | order of image providers |
+| `GEMINI_VOICE` / `GEMINI_VOICE_FEMALE` | `Charon` / `Kore` | Gemini TTS voices (Puck, Fenrir, Orus, Aoede, Leda, Zephyr...) |
+| `VOICE_SPEED` | `1.1` | narration speed-up, pitch kept |
+| `TELEGRAM_COMMANDS` | `true` | `false` = notifications only (when the Telegram bot is shared with another bot) |
 | `STYLE_BIBLE` | 3D animated film look… | the channel's fixed visual style |
 
 ### 4. First run

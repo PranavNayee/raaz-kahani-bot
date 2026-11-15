@@ -72,6 +72,15 @@ VOICE_PITCH  = env("VOICE_PITCH", "-4Hz") or "-4Hz"
 DIALOGUE_VOICE = flag("DIALOGUE_VOICE")                  # second voice for characters' spoken lines
 ALLOW_SILENT_TTS = flag("ALLOW_SILENT_TTS", "false")     # offline test only: silence instead of failing
 VOICE_FX = flag("VOICE_FX")
+
+# ---------------- Human-like voice (tts.py) ----------------
+# auto = ElevenLabs if ELEVENLABS_API_KEY is set, else Gemini TTS (free with GEMINI_API_KEY), else Edge.
+TTS_PROVIDER = (env("TTS_PROVIDER", "auto") or "auto").strip().lower()
+GEMINI_VOICE = env("GEMINI_VOICE", "Charon") or "Charon"                 # deep, clear male storyteller
+GEMINI_VOICE_FEMALE = env("GEMINI_VOICE_FEMALE", "Kore") or "Kore"       # female-led stories
+VOICE_SPEED = float(env("VOICE_SPEED", "1.1") or 1.1)                    # 1.1 = 10% faster, pitch kept
+STRICT_VOICE = flag("STRICT_VOICE", "false")                             # true: never fall back to Edge
+ELEVENLABS_MODEL = env("ELEVENLABS_MODEL", "eleven_multilingual_v2") or "eleven_multilingual_v2"
 VOICE_FILTER = ("highpass=f=70,equalizer=f=120:t=q:w=1:g=3,equalizer=f=3200:t=q:w=1.5:g=2,"
                 "acompressor=threshold=-20dB:ratio=3:attack=5:release=90:makeup=2,alimiter=limit=0.95")
 

@@ -64,6 +64,13 @@ jobs:
       MAX_SECONDS: ${{ vars.MAX_SECONDS || '150' }}
       IMAGE_PROVIDERS: ${{ vars.IMAGE_PROVIDERS || 'gemini,pollinations' }}
       STYLE_BIBLE: ${{ vars.STYLE_BIBLE }}
+      TTS_PROVIDER: ${{ vars.TTS_PROVIDER || 'auto' }}
+      GEMINI_VOICE: ${{ vars.GEMINI_VOICE || 'Charon' }}
+      GEMINI_VOICE_FEMALE: ${{ vars.GEMINI_VOICE_FEMALE || 'Kore' }}
+      VOICE_SPEED: ${{ vars.VOICE_SPEED || '1.1' }}
+      ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
+      ELEVENLABS_VOICE_ID: ${{ vars.ELEVENLABS_VOICE_ID }}
+      STRICT_VOICE: ${{ inputs.post_now || 'false' }}    # manual post-now: never the robotic voice
       POST_NOW: ${{ inputs.post_now || 'false' }}
       DRY_RUN: ${{ inputs.dry_run || 'false' }}
       FORCE_NEW: ${{ inputs.force_new || 'false' }}
