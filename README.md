@@ -126,6 +126,23 @@ Buttons do everything. Text commands also work: `/post` (approve the next video)
 
 Workflow inputs on **Make videos**: `post_now`, `dry_run`, `force_new`, `theme`, `platform` (`yt` / `ig` / `both`).
 
+## External trigger (backup for GitHub's timer)
+GitHub's scheduled runs can lag for hours (they didn't start at all on this repository's first day), so a free
+**Neon Function** (`tools/neon-trigger/index.mjs`, project `raaz-kahani-trigger`) runs the same schedules and asks
+GitHub to start each workflow. It only accepts calls from Neon's own scheduler. A workflow that runs twice is
+harmless: every job checks slot locks / "already done" first. It needs `GH_DISPATCH_TOKEN`: a **fine-grained**
+GitHub token for this repository only, permission *Actions: Read and write*, set as the function's environment
+variable in Neon.
+
+| Neon trigger | Cron (UTC) | Starts |
+|---|---|---|
+| make-videos | `17 */2 * * *` | Make videos |
+| post-queued | `4,24,44 * * * *` | Post queued videos |
+| creative-director | `30 4 * * *` | Creative director (10:00 IST) |
+| grow-channel | `37 * * * *` | Grow channel |
+| weekly-report | `23 15 * * 0` | Weekly report |
+| weekly-long-video | `30 14 * * 6` | Weekly long video |
+
 ## Run locally
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
