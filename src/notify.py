@@ -6,6 +6,11 @@ from util import log, redact
 TG_LIMIT = 48 * 1024 * 1024          # bots may upload up to 50 MB
 
 
+def _tag(msg):
+    """Every message starts with the channel name, so a Telegram chat shared with another bot stays readable."""
+    return f"[{C.CHANNEL}] {msg}"
+
+
 def _api(method):
     return f"https://api.telegram.org/bot{C.TELEGRAM_TOKEN()}/{method}"
 
@@ -14,7 +19,7 @@ def text(msg):
     if not C.telegram_enabled():
         log("[telegram off]", msg[:300]); return
     try:
-        requests.post(_api("sendMessage"), data={"chat_id": C.TELEGRAM_CHAT_ID(), "text": redact(msg)[:4000]}, timeout=60)
+        requests.post(_api("sendMessage"), data={"chat_id": C.TELEGRAM_CHAT_ID(), "text": _tag(redact(msg))[:4000]}, timeout=60)
     except Exception as e:
         log("Telegram text failed:", e)
 
@@ -33,7 +38,7 @@ def video(path, caption, fallback_url=""):
     try:
         send = path if os.path.getsize(path) <= TG_LIMIT else _small_copy(path)
         with open(send, "rb") as f:
-            r = requests.post(_api("sendVideo"), data={"chat_id": C.TELEGRAM_CHAT_ID(), "caption": redact(caption)[:1000],
+            r = requests.post(_api("sendVideo"), data={"chat_id": C.TELEGRAM_CHAT_ID(), "caption": _tag(redact(caption))[:1000],
                               "supports_streaming": "true"}, files={"video": f}, timeout=300)
         if r.status_code == 200:
             return
@@ -48,7 +53,7 @@ def photo(path, caption=""):
         return
     try:
         with open(path, "rb") as f:
-            requests.post(_api("sendPhoto"), data={"chat_id": C.TELEGRAM_CHAT_ID(), "caption": redact(caption)[:1000]},
+            requests.post(_api("sendPhoto"), data={"chat_id": C.TELEGRAM_CHAT_ID(), "caption": _tag(redact(caption))[:1000]},
                           files={"photo": f}, timeout=120)
     except Exception as e:
         log("Telegram photo failed:", e)
@@ -57,7 +62,7 @@ def photo(path, caption=""):
 def latest_command(since_ts):
     """Reads recent Telegram messages from YOUR chat only (latest command wins). Returns:
     'post' (/post: publish at the slot time), 'post_now' (/postnow: publish immediately), 'skip' (/skip) or None."""
-    if not C.telegram_enabled():
+    if not C.telegram_enabled() or not C.TELEGRAM_COMMANDS:
         return None
     r = requests.get(_api("getUpdates"), params={"limit": 100, "timeout": 0}, timeout=60)
     if r.status_code != 200:

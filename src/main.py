@@ -165,6 +165,8 @@ def run():
     how = {"auto": f"It will post automatically {when}.",
            "auto_unless_skip": f"It will post {when} unless you reply /skip.",
            "approve": f"Reply /post to publish it at {when} (or /postnow to publish immediately, /skip to discard)."}
+    if not C.TELEGRAM_COMMANDS:
+        how = dict.fromkeys(how, f"It will post automatically {when} (Telegram commands are off for this bot).")
     notify.video(out["video"], f"🎬 {vs['title']}\n{info}{warn}\n{how.get(C.REVIEW_MODE, how['approve'])}", url)
     _token_warning()
     log(f"✅ Video ready in {time.time() - t0:.0f}s. Queued for {when}.")

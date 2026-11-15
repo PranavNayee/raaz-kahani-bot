@@ -191,7 +191,7 @@ def run(force=False, wait=True):
         if cmd == "post_now":
             return publish(p)
         partly_live = p.get("done") and any(p["done"].values())
-        if C.REVIEW_MODE == "approve" and cmd != "post" and not partly_live:
+        if C.REVIEW_MODE == "approve" and C.TELEGRAM_COMMANDS and cmd != "post" and not partly_live:
             log(f"Waiting for your /post in Telegram (slot {slots.fmt(due_at(p))}).")
             return "awaiting_approval"
         wait_s = due_at(p) - time.time()

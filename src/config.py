@@ -27,6 +27,10 @@ def ig_enabled():
 def telegram_enabled():
     return bool(env("TELEGRAM_BOT_TOKEN") and env("TELEGRAM_CHAT_ID"))
 
+# false = notifications only: the bot never reads /post /postnow /skip (use this when the Telegram bot is shared
+# with another bot, so a command meant for that bot can never skip or post a Raaz Kahani video)
+TELEGRAM_COMMANDS = flag("TELEGRAM_COMMANDS", "true")
+
 # ---------------- Behaviour (GitHub: Settings > Secrets and variables > Actions > Variables) ----------------
 # REVIEW_MODE: auto             -> posts by itself at the slot time
 #              auto_unless_skip -> posts at the slot unless you send /skip in Telegram
