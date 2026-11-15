@@ -1,0 +1,104 @@
+name: Daily Raaz Kahani video
+# Makes tomorrow's video the night BEFORE (23:07 IST) and queues it for the 19:00 IST slot (POST_TIMES).
+# GitHub cron is often late or skipped, so there are backup triggers; every run after the first sees the video is
+# already made/posted and exits in seconds. Runs that start <5.5 h before the slot stay alive and post on time.
+on:
+  schedule:
+    - cron: "37 17 * * *"   # 23:07 IST  main run: makes tomorrow's video
+    - cron: "11 21 * * *"   # 02:41 IST  backup
+    - cron: "43 2 * * *"    # 08:13 IST  backup
+    - cron: "13 7 * * *"    # 12:43 IST  backup
+    - cron: "37 9 * * *"    # 15:07 IST  backup (waits and posts at 19:00)
+    - cron: "49 11 * * *"   # 17:19 IST  last backup (waits and posts at 19:00)
+  workflow_dispatch:
+    inputs:
+      post_now:
+        description: "Make a video and post it RIGHT NOW (ignores the slot time)"
+        type: boolean
+        default: false
+      dry_run:
+        description: "Render + send to Telegram only (do NOT queue or post). Files are attached as an artifact."
+        type: boolean
+        default: false
+      force_new:
+        description: "Re-make the next slot's video even if one is already queued"
+        type: boolean
+        default: false
+      theme:
+        description: "Story theme (auto = rotation driven by what performs best)"
+        type: choice
+        options: [auto, night_mystery, magic_rule, cursed_object, greedy_rich, family_love, friendly_monster, village_legend]
+        default: auto
+permissions:
+  contents: read
+  actions: write          # lets the job keep the schedules enabled (GitHub disables them after 60 idle days)
+concurrency:
+  group: video-generate
+  cancel-in-progress: false
+jobs:
+  make-video:
+    runs-on: ubuntu-latest
+    timeout-minutes: 358
+    env:
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+      SUPABASE_BUCKET: ${{ secrets.SUPABASE_BUCKET }}
+      IG_USER_ID: ${{ secrets.IG_USER_ID }}
+      IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+      YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
+      YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
+      YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
+      POLLINATIONS_TOKEN: ${{ secrets.POLLINATIONS_TOKEN }}
+      POST_TIMES: ${{ vars.POST_TIMES || '19:00' }}
+      TIMEZONE: ${{ vars.TIMEZONE || 'Asia/Kolkata' }}
+      REVIEW_MODE: ${{ vars.REVIEW_MODE || 'auto_unless_skip' }}
+      REVIEW_HOURS: ${{ vars.REVIEW_HOURS || '2' }}
+      YT_PRIVACY: ${{ vars.YT_PRIVACY || 'public' }}
+      SERIES_EVERY: ${{ vars.SERIES_EVERY || '3' }}
+      MAX_SECONDS: ${{ vars.MAX_SECONDS || '150' }}
+      IMAGE_PROVIDERS: ${{ vars.IMAGE_PROVIDERS || 'gemini,pollinations' }}
+      STYLE_BIBLE: ${{ vars.STYLE_BIBLE }}
+      POST_NOW: ${{ inputs.post_now || 'false' }}
+      DRY_RUN: ${{ inputs.dry_run || 'false' }}
+      FORCE_NEW: ${{ inputs.force_new || 'false' }}
+      THEME: ${{ inputs.theme || 'auto' }}
+      REQUIRE_RAQM: "true"
+      PYTHONPATH: src
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/media
+          key: media-v1
+      - name: Install ffmpeg + text shaping
+        timeout-minutes: 12
+        run: bash .github/setup-media.sh
+      - run: pip install -r requirements.txt
+      - name: Keep schedules alive
+        if: ${{ !inputs.dry_run }}
+        continue-on-error: true
+        run: gh workflow enable daily.yml && gh workflow enable post.yml && gh workflow enable engage.yml && gh workflow enable weekly.yml
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - run: python src/main.py
+      - name: Save dry-run files
+        if: ${{ always() && inputs.dry_run }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: dry-run
+          path: |
+            work/story.json
+            work/video.mp4
+            work/cover.jpg
+            work/caption.txt
+            work/yt_meta.json
+          if-no-files-found: ignore

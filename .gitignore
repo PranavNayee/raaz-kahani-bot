@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# outputs
+work/
+test_work/
+*.mp4
+
+# the reference implementation (read-only, cloned separately)
+aiverse-bot/
+
+# secrets - NEVER commit (the repo may be public)
+.env
+client_secret*.json
+*credentials*.json
+
+# OS / IDE
+.DS_Store
+.vscode/
+.idea/
