@@ -157,6 +157,23 @@ def _gemini(prompt, seed, ref=None):
 
 
 # ---------------------------------------------------------------- Pollinations
+_last_poll = [0.0]
+
+
+def _poll_gap():
+    """Seconds between Pollinations requests: the anonymous free tier allows 1 image per 45 s per IP."""
+    default = "8" if os.environ.get("POLLINATIONS_TOKEN") else "46"
+    return float(os.environ.get("POLLINATIONS_GAP", default) or default)
+
+
+def _pace():
+    wait = _last_poll[0] + _poll_gap() - time.time()
+    if wait > 0:
+        log(f"    waiting {wait:.0f}s (Pollinations free-tier pace)")
+        time.sleep(wait)
+    _last_poll[0] = time.time()
+
+
 def _pollinations(prompt, seed):
     url = C.POLLINATIONS_URL + urllib.parse.quote(prompt[:1400], safe="")
     # ask for ~7% extra height: the anonymous tier stamps a small logo in the bottom corner, which is cropped off
@@ -165,10 +182,10 @@ def _pollinations(prompt, seed):
     headers = {}
     if os.environ.get("POLLINATIONS_TOKEN"):
         headers["Authorization"] = f"Bearer {os.environ['POLLINATIONS_TOKEN']}"
+    _pace()
     r = requests.get(url, params=params, headers=headers, timeout=(15, 180))
+    _last_poll[0] = time.time()                  # the limit counts from when the image finished
     if r.status_code != 200 or not r.headers.get("content-type", "").startswith("image"):
-        if r.status_code == 429:
-            time.sleep(15)
         raise RuntimeError(f"pollinations {r.status_code}: {r.text[:120] if 'image' not in r.headers.get('content-type', '') else ''}")
     if len(r.content) < 15_000:
         raise RuntimeError("pollinations returned a tiny image")
@@ -209,7 +226,8 @@ def one(scene, story, ref=None, tries=3):
                 log(f"    {prov} try {attempt + 1}/{tries}: {str(e)[:160]}")
                 if prov in _disabled:
                     break
-                time.sleep(2 + 3 * attempt)
+                if prov == "gemini":
+                    time.sleep(2 + 3 * attempt)      # Pollinations paces itself (_pace)
     raise RuntimeError(f"no provider drew this scene ({last})")
 
 
