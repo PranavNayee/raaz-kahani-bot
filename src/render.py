@@ -27,8 +27,8 @@ HOOK_SIZE = 96
 YELLOW, WHITE, PINK = (255, 214, 10), (255, 255, 255), (255, 70, 160)
 # geometry per format: 9:16 Shorts/Reels and 16:9 long-form (set_format switches the module globals)
 FORMATS = {
-    "short": dict(W=1080, H=1920, CAP_SIZE=92, CAP_Y=1265, CAP_MAXW=820, HOOK_BOX=(90, 430, 990, 900), HOOK_SIZE=96),
-    "long": dict(W=1920, H=1080, CAP_SIZE=68, CAP_Y=935, CAP_MAXW=1400, HOOK_BOX=(260, 290, 1660, 760), HOOK_SIZE=92),
+    "short": dict(W=1080, H=1920, CAP_SIZE=92, CAP_Y=1265, CAP_MAXW=820, HOOK_BOX=(70, 420, 1010, 940), HOOK_SIZE=132),
+    "long": dict(W=1920, H=1080, CAP_SIZE=68, CAP_Y=935, CAP_MAXW=1400, HOOK_BOX=(220, 260, 1700, 780), HOOK_SIZE=120),
 }
 FMT = "short"
 
@@ -113,7 +113,7 @@ def vignette_mask():
     """L-mode mask: 255 in the middle, darker towards the edges + a soft band behind the captions."""
     yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
     r = np.sqrt(((xx - W / 2) / (W * 0.62)) ** 2 + ((yy - H * 0.46) / (H * 0.62)) ** 2)
-    m = 1 - 0.55 * np.clip(r - 0.55, 0, 1) ** 1.4
+    m = 1 - 0.38 * np.clip(r - 0.6, 0, 1) ** 1.4                 # light vignette: keep pictures bright
     band = np.exp(-((yy - CAP_Y) / 170) ** 2) * 0.22
     m = np.clip(m - band, 0, 1)
     return Image.fromarray((m * 255).astype(np.uint8), "L")
@@ -123,13 +123,16 @@ def hook_overlay(text, badge=None):
     img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
     x0, y0, x1, y1 = HOOK_BOX
-    d.rounded_rectangle((x0 - 20, y0 - 20, x1 + 20, y1 + 20), 40, fill=(0, 0, 0, 120))
+    glow = Image.new("RGBA", (W, H), (0, 0, 0, 0))              # soft dark halo behind the words, no box
+    ImageDraw.Draw(glow).ellipse((x0 - 40, y0 - 10, x1 + 40, y1 + 10), fill=(0, 0, 0, 120))
+    img = Image.alpha_composite(img, glow.filter(ImageFilter.GaussianBlur(60)))
+    d = ImageDraw.Draw(img)
     if badge:
         f = font(46, False)
         bw = f.getlength(badge) + 60
         d.rounded_rectangle((W / 2 - bw / 2, y0 - 95, W / 2 + bw / 2, y0 - 25), 34, fill=(220, 30, 60, 255))
         d.text((W / 2, y0 - 60), badge, font=f, fill=WHITE, anchor="mm")
-    draw_block(d, no_emoji(text), (x0 + 20, y0, x1 - 20, y1), HOOK_SIZE, fill=YELLOW, stroke=9, max_lines=4)
+    draw_block(d, no_emoji(text), (x0 + 10, y0, x1 - 10, y1), HOOK_SIZE, fill=YELLOW, stroke=13, max_lines=3)
     return img
 
 
@@ -256,6 +259,8 @@ def camera(move, p, punch=0.0):
         z, cx, cy = 1.12 - 0.12 * e, W / 2, H / 2
     elif move == "close":
         z, cx, cy = 1.14 + 0.06 * e, W / 2, H * 0.45
+    elif move == "tight":                                       # virtual close-up when a scene has one picture
+        z, cx, cy = 1.32 + 0.08 * e, W / 2, H * 0.42
     else:
         z = 1.1
         hx, hy = W / 2 - W / (2 * z), H / 2 - H / (2 * z)
@@ -384,6 +389,10 @@ class Frames:
         self.white = Image.new("RGB", (W, H), (255, 255, 255))
         hook = hook_overlay(plan["hook"], plan["badge"])
         self.hook_a, self.hook_rgb = hook.getchannel("A"), hook.convert("RGB")
+        x0, y0, x1, y1 = HOOK_BOX
+        self.hook_box = (0, max(0, y0 - 130), W, min(H, y1 + 60))
+        self.hook_crop = hook.crop(self.hook_box)
+        self.srcs2 = {}
         self.card = end_card(shot(self.src(len(plan["tl"]) - 1), plan["moves"][-1], 1.0), plan["end_card"], plan["vs"])
         self.caps = CaptionCache(plan.get("caption", "yellow"))
         self.fog = fog_layer(plan["seed"]) if "mist" in plan["particles"] else None
@@ -403,27 +412,51 @@ class Frames:
         d.text((W / 2, 85), lines[0], font=f, fill=YELLOW, anchor="mm")
         return img
 
-    def src(self, i):
-        if i not in self.srcs:
-            if len(self.srcs) > 4:                               # keep memory small: scenes come in order
-                self.srcs.pop(min(self.srcs))
-            img = Image.open(self.p["images"][i]).convert("RGB")
-            if img.size != (W, H):
-                from images import cover_fit
-                img = cover_fit(img)
-            self.srcs[i] = img.resize((int(W * SRC_SCALE), int(H * SRC_SCALE)), Image.BICUBIC)
-        return self.srcs[i]
+    @staticmethod
+    def _prep(path):
+        """Load, fit, brighten dark pictures and give every picture a little extra colour and contrast."""
+        from PIL import ImageEnhance, ImageStat
+        img = Image.open(path).convert("RGB")
+        if img.size != (W, H):
+            from images import cover_fit
+            img = cover_fit(img)
+        lum = ImageStat.Stat(img.convert("L").resize((90, 160))).mean[0]
+        if lum < 100:                                           # night scenes still readable on a phone
+            img = ImageEnhance.Brightness(img).enhance(min(1.55, 108 / max(lum, 20)))
+        img = ImageEnhance.Contrast(ImageEnhance.Color(img).enhance(1.15)).enhance(1.08)
+        return img.resize((int(W * SRC_SCALE), int(H * SRC_SCALE)), Image.BICUBIC)
+
+    def src(self, i, second=False):
+        cache = self.srcs2 if second else self.srcs
+        if i not in cache:
+            if len(cache) > 4:                                   # keep memory small: scenes come in order
+                cache.pop(min(cache))
+            path = (self.p.get("images2") or [None] * len(self.p["images"]))[i] if second else self.p["images"][i]
+            cache[i] = self._prep(path) if path else None
+        return cache[i]
 
     def scene(self, i, t):
+        """A scene is cut into 2-3 shots (its second picture, or a tight close-up of the first) so the picture
+        changes every ~2-3 s; every cut gets a small zoom punch."""
         p = self.p
         st, d = p["tl"][i]
         t0 = t - st
+        n = 1 if d < 3.4 else 2 if d < 6.6 else 3
+        sl = d / n
+        k = min(n - 1, max(0, int(t0 // sl)))
+        ts = t0 - k * sl                                          # time inside this shot
         punch = 0.05 * (1 - t0 / 0.5) if (p["twist_i"] == i and 0 <= t0 < 0.5) else \
-            (0.025 * (1 - t0 / 0.35) if (i > 0 and 0 <= t0 < 0.35) else 0.0)    # beat punch on every cut
+            (0.03 * (1 - ts / 0.3) if ((i > 0 or k > 0) and 0 <= ts < 0.3) else 0.0)   # beat punch on every cut
         dx, dy = shake(t0, i) if p["emotions"][i] in SHAKE_EMO and t0 >= 0 else (0.0, 0.0)
         if (dx or dy) and t0 < 0.6:
             punch = max(punch, 0.035 * (1 - t0 / 0.6))           # room for the shake at the frame edges
-        return shot(self.src(i), p["moves"][i], t0 / d, punch, dx, dy)
+        if k % 2 == 1:
+            s2 = self.src(i, second=True)
+            if s2 is not None:
+                return shot(s2, MOVES[(i + 3) % len(MOVES)], ts / sl, punch, dx, dy)
+            return shot(self.src(i), "tight", ts / sl, punch, dx, dy)
+        move = p["moves"][i] if k == 0 else ("out" if p["moves"][i] == "in" else "in")
+        return shot(self.src(i), move, ts / sl, punch, dx, dy)
 
     def frame(self, f):
         p = self.p
@@ -455,9 +488,21 @@ class Frames:
             if 0 <= fi < len(FLASH):
                 frame = Image.blend(frame, self.white, FLASH[fi])
         frame = Image.composite(frame, self.black, self.mask)
-        if t < HOOK_T:                                              # hook text: pops in, fades out
-            a = min(1.0, t / 0.15, (HOOK_T - t) / 0.35)
-            frame.paste(self.hook_rgb, (0, 0), self.hook_a if a >= 1 else self.hook_a.point(lambda v, a=a: int(v * a)))
+        if t < HOOK_T:                                              # hook text: pops in big, fades out
+            if t < 0.2:
+                sc = 0.7 + 0.42 * (t / 0.2)                          # 70% -> 112% ...
+            elif t < 0.3:
+                sc = 1.12 - 0.12 * ((t - 0.2) / 0.1)                 # ... -> 100%
+            else:
+                sc = 1.0
+            a = min(1.0, (HOOK_T - t) / 0.35)
+            if sc != 1.0:
+                cw, ch = int(self.hook_crop.width * sc), int(self.hook_crop.height * sc)
+                piece = self.hook_crop.resize((cw, ch), Image.BILINEAR)
+                bx = self.hook_box
+                frame.paste(piece, ((W - cw) // 2, (bx[1] + bx[3]) // 2 - ch // 2), piece)
+            else:
+                frame.paste(self.hook_rgb, (0, 0), self.hook_a if a >= 1 else self.hook_a.point(lambda v, a=a: int(v * a)))
             return frame
         for bt, banner in self.banners:                         # chapter titles (long-form)
             if bt <= t < bt + 2.6:
@@ -534,11 +579,11 @@ def render(vs, images, voices, work, out_path, music=None, chapters=None):
     lufs = soundtrack.loudnorm(mix, norm)
     log(f"   {len(amb)} ambience beds + {len(hits)} effects · loudness {lufs} LUFS (target {C.TARGET_LUFS})")
 
-    plan = {"images": [im["path"] for im in images],
+    plan = {"images": [im["path"] for im in images], "images2": [im.get("path2") for im in images],
             "moves": ["close" if im.get("reused") else MOVES[i % len(MOVES)] for i, im in enumerate(images)],
             "emotions": [sc.get("emotion") for sc in scenes], "particles": [particle_kind(sc) for sc in scenes],
             "tl": tl, "story_end": story_end, "twist_i": twist_i, "groups": groups,
-            "hook": vs.get("hook") or vs["title"], "badge": {1: "PART 1", 2: "PART 2"}.get(vs.get("part")),
+            "hook": vs.get("hook") or vs["title"], "badge": "PART 2" if vs.get("part") == 2 else None,
             "end_card": vs.get("end_card", "cta"), "seed": int(vs.get("seed", 7)) % 10000,
             "caption": (vs.get("variety") or {}).get("caption", "yellow"), "fmt": FMT,
             "chapters": [(tl[i][0], label) for i, label in (chapters or [])],

@@ -45,16 +45,23 @@ def safe(text):
     return re.sub(r"\s+", " ", text).strip()
 
 
-def build_prompt(scene, story):
-    """style bible + visual bible of each character in this scene + the scene itself."""
-    p = scene["image_prompt"]
+GENDER = {"male": "male", "female": "female", "other": "magical being"}
+LOOK = ("bright and clearly readable on a phone screen, vivid saturated colours, strong contrast, glowing light "
+        "sources, expressive faces")
+
+
+def build_prompt(scene, story, shot=1):
+    """style bible + visual bible (with age/gender) of each character in this scene + the scene itself.
+    shot=2 draws the scene's second camera shot (shot2_prompt)."""
+    p = scene.get("shot2_prompt") if shot == 2 and scene.get("shot2_prompt") else scene["image_prompt"]
     chars = [c for c in story.get("characters", [])
              if re.search(rf"\b({re.escape(c['name'].split()[0])}|{re.escape(c['id'])})\b", p, re.I)
              or scene.get("speaker") == c["id"]]
-    who = " ".join(f"{c['name']}: {c['visual_bible']}." for c in chars)
+    who = " ".join(f"{c['name']} ({GENDER.get(c.get('gender'), '')}): {c['visual_bible']}." for c in chars)
     mood = scene.get("emotion", "")
-    txt = f"{story.get('style_bible', C.STYLE_BIBLE)}. {('Characters - ' + who + ' ') if who else ''}Scene: {p}. " \
-          f"Mood: {mood}. {'Vertical 9:16' if ASPECT == '9:16' else 'Wide cinematic 16:9'} frame, main subject in the centre. {NEGATIVE}"
+    frame = "Vertical 9:16" if ASPECT == "9:16" else "Wide cinematic 16:9"
+    txt = f"{frame} shot. Scene: {p}. {('Characters - ' + who + ' ') if who else ''}Mood: {mood}. " \
+          f"Style: {story.get('style_bible', C.STYLE_BIBLE)}, {LOOK}. Main subject large in the centre. {NEGATIVE}"
     return safe(txt)
 
 
@@ -223,10 +230,11 @@ def _providers():
     return out
 
 
-def one(scene, story, ref=None, tries=3):
-    """Returns (PIL image 1080x1920, provider) or raises."""
-    prompt = build_prompt(scene, story)
-    seed = int(story.get("seed", 42))
+def one(scene, story, ref=None, tries=3, shot=1, idx=0):
+    """Returns (PIL image 1080x1920, provider) or raises. Every scene/shot gets its own seed: one shared seed made
+    different scenes come out as near-identical compositions; consistency comes from the visual bibles instead."""
+    prompt = build_prompt(scene, story, shot)
+    seed = (int(story.get("seed", 42)) + idx * 7919 + (shot - 1) * 104729) % 2_000_000_000
     last = None
     for prov in _providers():
         if prov in _disabled:
@@ -249,8 +257,9 @@ def one(scene, story, ref=None, tries=3):
 
 
 def make_all(story, out_dir):
-    """Draws every scene. Returns [{path, provider, reused}] - one per scene, never fails on a single bad image.
-    Raises only when too few real images exist (MIN_REAL_IMAGES) outside offline mode."""
+    """Draws every scene (plus a second camera shot per scene when SECOND_SHOTS is on). Returns
+    [{path, path2, provider, reused}] - one per scene; never fails on a single bad image. Raises only when too
+    few real images exist (MIN_REAL_IMAGES) outside offline mode."""
     os.makedirs(out_dir, exist_ok=True)
     scenes = story["scenes"]
     res = [None] * len(scenes)
@@ -259,7 +268,7 @@ def make_all(story, out_dir):
         log(f"  🎨 scene {i + 1}/{len(scenes)}")
         path = os.path.join(out_dir, f"scene_{i + 1:02d}.jpg")
         try:
-            img, prov = one(sc, story, ref)
+            img, prov = one(sc, story, ref, idx=i)
             img.save(path, quality=93)
             res[i] = {"path": path, "provider": prov, "reused": False}
             ref = ref or img
@@ -274,6 +283,10 @@ def make_all(story, out_dir):
             path = os.path.join(out_dir, f"scene_{i + 1:02d}.jpg")
             placeholder(sc, story, i).save(path, quality=92)
             res[i] = {"path": path, "provider": "placeholder", "reused": False}
+            if C.SECOND_SHOTS:
+                p2 = os.path.join(out_dir, f"scene_{i + 1:02d}_b.jpg")
+                placeholder(sc, story, i + 500).save(p2, quality=92)
+                res[i]["path2"] = p2
         return res
     first = next(r for r in res if r)
     prev = None
@@ -282,4 +295,17 @@ def make_all(story, out_dir):
             prev = res[i]
         else:
             res[i] = dict(prev or first, reused=True)
+            res[i].pop("path2", None)
+    if C.SECOND_SHOTS:                                       # second camera shots: nice to have, never required
+        for i, sc in enumerate(scenes):
+            if res[i].get("reused"):
+                continue
+            log(f"  🎨 scene {i + 1}/{len(scenes)} - second shot")
+            p2 = os.path.join(out_dir, f"scene_{i + 1:02d}_b.jpg")
+            try:
+                img, _ = one(sc, story, ref, tries=2, shot=2, idx=i)
+                img.save(p2, quality=93)
+                res[i]["path2"] = p2
+            except Exception as e:
+                log(f"    second shot {i + 1} skipped (a close-up crop is used): {str(e)[:120]}")
     return res

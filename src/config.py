@@ -83,6 +83,7 @@ POLLINATIONS_URL = env("POLLINATIONS_URL", "https://image.pollinations.ai/prompt
 POLLINATIONS_MODEL = env("POLLINATIONS_MODEL", "flux") or "flux"
 IMAGE_REFERENCE = flag("IMAGE_REFERENCE")      # Gemini: pass the first good frame as a style/character reference
 MIN_REAL_IMAGES = float(env("MIN_REAL_IMAGES", "0.6") or 0.6)   # below this share of real images the video is not made
+SECOND_SHOTS = flag("SECOND_SHOTS", "true")   # a second camera shot per scene: a new picture every ~2-3 s
 OFFLINE = flag("OFFLINE", "false")            # tests: no network at all (placeholder images, silent TTS)
 
 # ---------------- Voice ----------------

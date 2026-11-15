@@ -39,6 +39,7 @@ SCHEMA = {
     "properties": {
         "title": {"type": "string", "minLength": 12, "maxLength": 95},
         "hook": {"type": "string", "minLength": 12, "maxLength": 140},
+        "hook_text": {"type": "string", "maxLength": 70},
         "premise": {"type": "string", "minLength": 15, "maxLength": 300},
         "hook_type": {"type": "string"},
         "narrator": {"enum": ["male", "female"]},
@@ -61,6 +62,7 @@ SCHEMA = {
                            "narration_hi": {"type": "string", "minLength": 8, "maxLength": 400},
                            "speaker": {"type": "string"},
                            "image_prompt": {"type": "string", "minLength": 20, "maxLength": 600},
+                           "shot2_prompt": {"type": "string", "maxLength": 600},
                            "emotion": {"type": "string"},
                            "seconds": {"type": "number", "minimum": 1, "maximum": 30}}}},
     },
@@ -98,7 +100,8 @@ STRUCTURE (strict):
    to the viewer in Hindi (like "आप होते तो क्या करते? कमेंट में बताइए!").
 
 LANGUAGE: narration_hi in Devanagari, simple everyday spoken Hindi (like a dadi telling a story), short sentences,
-vivid sounds and feelings, no English words, no difficult Sanskrit. Every scene 10-28 words. {length_rule}
+vivid sounds and feelings, no English words, no difficult Sanskrit, correct standard spelling (शापित, not सरापित).
+Every scene 10-28 words. {length_rule}
 
 HARD RULES:
 - Completely original world, names and plot. NEVER use or mention copyrighted characters, films, cartoons, books,
@@ -107,17 +110,27 @@ HARD RULES:
   content, hate, or anything dangerous a kid could copy. Villains are defeated by wit, never by violence.
 - Never repeat or closely resemble these past premises: {past}
 {winners}
-VISUALS (an AI image model draws one picture per scene, the SAME characters must look the same every time):
-- characters: 1-4 characters, each with a fixed "visual_bible" in English (age, face, hair, skin tone, exact clothes
-  and colours, one signature item). Use simple lowercase ids like "meera", "seth".
-- image_prompt (English): describe ONLY this scene's action, setting, camera angle (close-up / wide / low angle),
-  lighting and mood. Refer to characters by name. No text, letters or signs in the picture.
+VISUALS (an AI image model draws TWO pictures per scene; viewers decide in 1 second whether to keep watching):
+- characters: 1-4 characters, each with a fixed "visual_bible" in English that STARTS with age + gender
+  ("8-year-old Indian boy, ...", "old Indian woman, ...") then face, hair, skin tone, exact clothes and colours, one
+  signature item. Use simple lowercase ids like "kaju", "seth".
+- Scene 1's image_prompt is the most shocking picture of the whole story: the impossible thing HAPPENING, in a
+  dramatic close-up (e.g. a villager's legs turning into carved wood, a moon reaching down) - never an empty street.
+- At least 3 scenes must clearly SHOW the curse / magic / creature / impossible event on screen, and the antagonist
+  must be shown. Every scene shows a different place, angle or subject - never repeat a composition.
+- Every picture is bright and readable on a phone even at night: moonlight, lantern glow, glowing magic, vivid
+  saturated colours, strong contrast, expressive faces.
+- image_prompt (English): ONLY this scene's action, setting, camera angle (close-up / wide / low angle / over the
+  shoulder), lighting and mood. Refer to characters by name. No text, letters or signs in the picture.
+- shot2_prompt (English): a SECOND, clearly different shot of the same moment - an extreme close-up of a face,
+  hands or the magic object, or a dramatic reverse / top-down angle.
 - The pictures will be drawn in this style: {style_hint}. Write image prompts that suit it.
 - style_bible: one short English line for this story's colour palette and mood (the style above is added for you).
 
 Return ONLY this JSON:
 {{"title": "the hook line in Roman Hinglish, max 90 chars, may end with one emoji like 😱",
-  "hook": "same hook in Roman Hinglish (on-screen text in the first 2 seconds)",
+  "hook": "same hook in Roman Hinglish",
+  "hook_text": "ON-SCREEN text for the first 2 seconds: max 7 words, Roman Hinglish, pure curiosity, NEVER says who solves it (e.g. 'Is gaon mein log lakdi ban jaate the 😱')",
   "premise": "one English sentence summarising the core idea (used to avoid repeats)",
   "hook_type": "one of {hook_types}",
   "narrator": "male or female (female for stories centred on a girl/woman/mother)",
@@ -128,7 +141,7 @@ Return ONLY this JSON:
   "characters": [{{"id": "meera", "name": "Meera", "gender": "female", "visual_bible": "..."}}],
   "style_bible": "...",
   "scenes": [{{"id": 1, "narration_hi": "...", "speaker": "narrator or a character id when the line is that character speaking",
-              "image_prompt": "...", "emotion": "one of {emotions}", "seconds": 6}}]}}"""
+              "image_prompt": "...", "shot2_prompt": "...", "emotion": "one of {emotions}", "seconds": 6}}]}}"""
 
 SERIES_BLOCK = """
 THIS IS A 2-PART SERIES. Write the WHOLE story ({n_min}-{n_max} scenes) in one go. It will be cut in two videos:
@@ -255,6 +268,10 @@ def validate(s, history=(), series=False, length="mid"):
     for h in history:
         if h.get("premise") and similar(h["premise"], s["premise"]) > 0.5:
             raise ValueError(f"premise too close to an old story: {h['premise'][:80]}")
+    ht = re.sub(r"\s+", " ", s.get("hook_text") or "").strip()
+    if not ht or len(ht.split()) > 9:                          # short, spoiler-free on-screen hook
+        ht = re.split(r"(?<=[!?])\s+|\s+(?:lekin|par|magar)\s+", s["title"], flags=re.I)[0].strip()
+    s["hook_text"] = ht
     s["hook_type"] = s["hook_type"] if s["hook_type"] in HOOK_TYPES else "object_power"
     s["title"] = re.sub(r"\s+", " ", s["title"]).strip()
     s["mood_line"] = (s.get("style_bible") or "")[:160]
@@ -411,7 +428,7 @@ def make_parts(s):
                                     "max_seconds", "direction", "similarity")}
     sid = "s" + hashlib.sha1(s["premise"].encode()).hexdigest()[:8]
     if not s.get("series"):
-        return [dict(common, title=s["title"], hook=s["hook"], scenes=s["scenes"], twist_scene=s["twist_scene"],
+        return [dict(common, title=s["title"], hook=s.get("hook_text") or s["hook"], scenes=s["scenes"], twist_scene=s["twist_scene"],
                      part=None, series_id=None, end_card=(s.get("variety") or {}).get("end", "cta_a"))]
     tw = s["twist_scene"]
     p1 = s["scenes"][:tw - 1]
@@ -420,7 +437,7 @@ def make_parts(s):
              "emotion": "tense", "seconds": 6}
     p2 = [recap] + [dict(x, id=i + 2) for i, x in enumerate(s["scenes"][tw - 1:])]
     t2 = s.get("part2_title") or s["title"]
-    return [dict(common, title=s["title"], hook=s["hook"], scenes=p1, twist_scene=None, part=1, series_id=sid,
+    return [dict(common, title=s["title"], hook=s.get("hook_text") or s["hook"], scenes=p1, twist_scene=None, part=1, series_id=sid,
                  end_card="part2", series_title=s["title"]),
             dict(common, title=t2, hook=t2, scenes=p2, twist_scene=2, part=2, series_id=sid,
                  end_card=(s.get("variety") or {}).get("end", "cta_a"),
