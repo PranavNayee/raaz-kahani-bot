@@ -15,6 +15,13 @@ import config as C
 from util import log
 
 W, H = 1080, 1920
+ASPECT = "9:16"
+
+
+def set_format(name):
+    """short = 1080x1920 (9:16), long = 1920x1080 (16:9)."""
+    global W, H, ASPECT
+    W, H, ASPECT = (1920, 1080, "16:9") if name == "long" else (1080, 1920, "9:16")
 GEM_URL = "https://generativelanguage.googleapis.com/v1beta"
 GEM_FALLBACK = ["gemini-2.5-flash-image", "gemini-2.0-flash-preview-image-generation"]
 _gem_models = None
@@ -47,12 +54,13 @@ def build_prompt(scene, story):
     who = " ".join(f"{c['name']}: {c['visual_bible']}." for c in chars)
     mood = scene.get("emotion", "")
     txt = f"{story.get('style_bible', C.STYLE_BIBLE)}. {('Characters - ' + who + ' ') if who else ''}Scene: {p}. " \
-          f"Mood: {mood}. Vertical 9:16 frame, main subject in the centre. {NEGATIVE}"
+          f"Mood: {mood}. {'Vertical 9:16' if ASPECT == '9:16' else 'Wide cinematic 16:9'} frame, main subject in the centre. {NEGATIVE}"
     return safe(txt)
 
 
 # ---------------------------------------------------------------- image helpers
-def cover_fit(img, w=W, h=H):
+def cover_fit(img, w=None, h=None):
+    w, h = w or W, h or H
     img = img.convert("RGB")
     s = max(w / img.width, h / img.height)
     img = img.resize((max(w, round(img.width * s)), max(h, round(img.height * s))), Image.LANCZOS)
@@ -62,12 +70,21 @@ def cover_fit(img, w=W, h=H):
 
 def looks_bad(img):
     """Blank, flat or tiny images (failed generations, rate-limit placeholders)."""
-    a = np.asarray(img.convert("L").resize((64, 114)), dtype=np.float32)
+    a = np.asarray(img.convert("L").resize((64, 64)), dtype=np.float32)
     return img.width < 256 or a.std() < 10
 
 
 def placeholder(scene, story, idx=0):
     """A moody painted-looking backdrop drawn in code (tests / last resort). Never uses caption yellow."""
+    global W, H
+    if (W, H) != (1080, 1920):                                # draw portrait, then crop to the current format
+        keep = (W, H)
+        W, H = 1080, 1920
+        try:
+            img = placeholder(scene, story, idx)
+        finally:
+            W, H = keep
+        return cover_fit(img)
     pal = {"fear": ((10, 14, 40), (60, 30, 90)), "shock": ((20, 8, 30), (120, 40, 70)), "joy": ((40, 60, 120), (240, 150, 90)),
            "warm": ((50, 40, 90), (230, 130, 80)), "triumph": ((30, 50, 110), (220, 120, 70)), "sad": ((15, 25, 50), (70, 90, 130))}
     top, bot = pal.get(scene.get("emotion"), ((12, 20, 48), (40, 70, 120)))
@@ -130,7 +147,7 @@ def _gemini(prompt, seed, ref=None):
     for model in gemini_models():
         r = None
         for use_seed in ((True, False) if model not in _no_seed else (False,)):
-            cfg = {"responseModalities": ["IMAGE"], "imageConfig": {"aspectRatio": "9:16"}}
+            cfg = {"responseModalities": ["IMAGE"], "imageConfig": {"aspectRatio": ASPECT}}
             if use_seed:
                 cfg["seed"] = seed
             r = requests.post(f"{GEM_URL}/models/{model}:generateContent", timeout=(10, 120),

@@ -23,7 +23,22 @@ CAP_SIZE = 92
 CAP_Y = 1265                    # caption centre: above the Reels/Shorts bottom UI, below the face area
 CAP_MAXW = 820                  # 130 px clear of the left edge and the right-side buttons
 HOOK_BOX = (90, 430, 990, 900)  # hook text area (below the top bar)
-YELLOW, WHITE = (255, 214, 10), (255, 255, 255)
+HOOK_SIZE = 96
+YELLOW, WHITE, PINK = (255, 214, 10), (255, 255, 255), (255, 70, 160)
+# geometry per format: 9:16 Shorts/Reels and 16:9 long-form (set_format switches the module globals)
+FORMATS = {
+    "short": dict(W=1080, H=1920, CAP_SIZE=92, CAP_Y=1265, CAP_MAXW=820, HOOK_BOX=(90, 430, 990, 900), HOOK_SIZE=96),
+    "long": dict(W=1920, H=1080, CAP_SIZE=68, CAP_Y=935, CAP_MAXW=1400, HOOK_BOX=(260, 290, 1660, 760), HOOK_SIZE=92),
+}
+FMT = "short"
+
+
+def set_format(name):
+    global FMT
+    globals().update(FORMATS[name])
+    FMT = name
+    import images
+    images.set_format(name)
 MOVES = ["in", "pan_r", "out", "up", "pan_l", "in"]
 
 _fonts = {}
@@ -114,26 +129,52 @@ def hook_overlay(text, badge=None):
         bw = f.getlength(badge) + 60
         d.rounded_rectangle((W / 2 - bw / 2, y0 - 95, W / 2 + bw / 2, y0 - 25), 34, fill=(220, 30, 60, 255))
         d.text((W / 2, y0 - 60), badge, font=f, fill=WHITE, anchor="mm")
-    draw_block(d, no_emoji(text), (x0 + 20, y0, x1 - 20, y1), 96, fill=YELLOW, stroke=9, max_lines=4)
+    draw_block(d, no_emoji(text), (x0 + 20, y0, x1 - 20, y1), HOOK_SIZE, fill=YELLOW, stroke=9, max_lines=4)
     return img
 
 
+def _bx(y0, y1, width=None):
+    """A centred text box between two heights given as fractions of the frame height."""
+    cw = width or (min(W - 160, 920) if FMT == "short" else 1300)
+    return (W / 2 - cw / 2, y0 * H, W / 2 + cw / 2, y1 * H)
+
+
 def end_card(bg, kind, story):
+    """kind: part2 | cta_a | cta_b | cta_c | long. Wording follows the platform (Follow on Instagram, Subscribe on
+    YouTube). Three CTA layouts rotate (variety.py) so no two videos in a row end the same way."""
     img = bg.filter(ImageFilter.GaussianBlur(14)).convert("RGBA")
     img = Image.alpha_composite(img, Image.new("RGBA", (W, H), (0, 0, 0, 150)))
     d = ImageDraw.Draw(img)
+    follow = "Subscribe karo" if story.get("platform") == "yt" else "Follow karo"
+    q = no_emoji(story.get("cta_question") or "Aap hote toh kya karte?")
+    k = 0.9 if FMT == "long" else 1.0
     if kind == "part2":
-        when = C.POST_TIMES[0] if C.POST_TIMES else "19:00"
-        h, m = (int(x) for x in when.split(":"))
-        draw_block(d, "Part 2 kal!", (80, 560, 1000, 820), 150, fill=YELLOW, stroke=10, max_lines=1)
-        draw_block(d, f"कल शाम {h % 12 or 12} बजे", (80, 860, 1000, 1000), 84, stroke=7, max_lines=1)
-        draw_block(d, "Follow karo taaki raaz chhoot na jaaye", (100, 1060, 980, 1260), 62, stroke=6, max_lines=2)
-    else:
-        draw_block(d, no_emoji(story.get("cta_question") or "Aap hote toh kya karte?"), (90, 560, 990, 900), 100,
-                   fill=YELLOW, stroke=9, max_lines=3)
-        draw_block(d, "Comment mein batao", (100, 960, 980, 1080), 70, stroke=7, max_lines=1)
-        draw_block(d, "Roz ek nayi raaz bhari kahani - Follow karo", (100, 1120, 980, 1300), 54, stroke=6, max_lines=2)
-    draw_block(d, C.CHANNEL.upper(), (100, 330, 980, 430), 58, fill=(230, 230, 255), stroke=6, max_lines=1)
+        draw_block(d, "Part 2 kal!", _bx(.29, .43), int(150 * k), fill=YELLOW, stroke=10, max_lines=1)
+        draw_block(d, story.get("part2_when") or "कल शाम इसी समय", _bx(.45, .52), int(84 * k), stroke=7, max_lines=1)
+        draw_block(d, f"{follow} taaki raaz chhoot na jaaye", _bx(.55, .66), int(62 * k), stroke=6, max_lines=2)
+    elif kind == "long":
+        draw_block(d, "Kahani kaisi lagi?", _bx(.25, .40), int(120 * k), fill=YELLOW, stroke=10, max_lines=1)
+        draw_block(d, q, _bx(.42, .60), int(70 * k), stroke=7, max_lines=2)
+        draw_block(d, f"{follow} - har hafte ek poori kahani", _bx(.64, .74), int(56 * k), stroke=6, max_lines=2)
+    elif kind == "cta_b":
+        draw_block(d, "Aapka jawab?", _bx(.24, .33), int(110 * k), fill=WHITE, stroke=9, max_lines=1)
+        draw_block(d, q, _bx(.35, .52), int(92 * k), fill=YELLOW, stroke=9, max_lines=3)
+        x0, y0, x1, y1 = _bx(.56, .63, 640 if FMT == "short" else 720)
+        d.rounded_rectangle((x0, y0, x1, y1), 40, fill=YELLOW + (255,))
+        draw_block(d, "Comment karo", (x0, y0, x1, y1), int(64 * k), fill=(20, 20, 20), stroke=0, max_lines=1)
+        draw_block(d, f"{follow} - roz ek nayi kahani", _bx(.66, .72), int(50 * k), stroke=5, max_lines=1)
+    elif kind == "cta_c":
+        draw_block(d, q, _bx(.20, .40), int(96 * k), fill=WHITE, stroke=9, max_lines=3)
+        r = int(H * 0.07)
+        d.ellipse((W / 2 - r, H * .47 - r, W / 2 + r, H * .47 + r), outline=YELLOW + (255,), width=10)
+        d.text((W / 2, H * .47), "?", font=font(int(r * 1.3), False), fill=YELLOW, anchor="mm")
+        draw_block(d, "Comment mein likho", _bx(.56, .62), int(70 * k), fill=YELLOW, stroke=7, max_lines=1)
+        draw_block(d, f"Agli kahani kal - {follow}", _bx(.64, .70), int(52 * k), stroke=5, max_lines=1)
+    else:                                                       # cta_a (and the old "cta")
+        draw_block(d, q, _bx(.29, .47), int(100 * k), fill=YELLOW, stroke=9, max_lines=3)
+        draw_block(d, "Comment mein batao", _bx(.50, .5625), int(70 * k), stroke=7, max_lines=1)
+        draw_block(d, f"Roz ek nayi raaz bhari kahani - {follow}", _bx(.583, .677), int(54 * k), stroke=6, max_lines=2)
+    draw_block(d, C.CHANNEL.upper(), _bx(.172, .224), int(58 * k), fill=(230, 230, 255), stroke=6, max_lines=1)
     return img.convert("RGB")
 
 
@@ -162,8 +203,12 @@ def caption_groups(words, scene_bounds, max_words=4):
 
 
 class CaptionCache:
-    def __init__(self):
+    """Pre-drawn caption groups. Styles rotate between videos: yellow (white words, active word yellow),
+    box (dark rounded box, active word on a yellow chip) and pink (active word pink)."""
+
+    def __init__(self, style="yellow"):
         self.cache = {}
+        self.style = style
 
     def get(self, gi, group, active):
         key = (gi, active)
@@ -178,9 +223,19 @@ class CaptionCache:
             img = Image.new("RGBA", (W, 200), (0, 0, 0, 0))
             d = ImageDraw.Draw(img)
             x = (W - total) / 2
+            if self.style == "box":
+                d.rounded_rectangle((x - 34, 100 - CAP_SIZE * 0.72, x + total + 34, 100 + CAP_SIZE * 0.72), 26,
+                                    fill=(10, 10, 20, 175))
             for k, (w, wd) in enumerate(zip(ws, widths)):
-                d.text((x, 100), w, font=f, fill=YELLOW if k == active else WHITE, anchor="lm",
-                       stroke_width=8, stroke_fill=(0, 0, 0))
+                on = k == active
+                if self.style == "box":
+                    if on:
+                        d.rounded_rectangle((x - 12, 100 - CAP_SIZE * 0.6, x + wd + 12, 100 + CAP_SIZE * 0.6), 18,
+                                            fill=YELLOW + (255,))
+                    d.text((x, 100), w, font=f, fill=(15, 15, 15) if on else WHITE, anchor="lm")
+                else:
+                    col = (PINK if self.style == "pink" else YELLOW) if on else WHITE
+                    d.text((x, 100), w, font=f, fill=col, anchor="lm", stroke_width=8, stroke_fill=(0, 0, 0))
                 x += wd + space
             self.cache[key] = img
         return self.cache[key]
@@ -330,10 +385,23 @@ class Frames:
         hook = hook_overlay(plan["hook"], plan["badge"])
         self.hook_a, self.hook_rgb = hook.getchannel("A"), hook.convert("RGB")
         self.card = end_card(shot(self.src(len(plan["tl"]) - 1), plan["moves"][-1], 1.0), plan["end_card"], plan["vs"])
-        self.caps = CaptionCache()
+        self.caps = CaptionCache(plan.get("caption", "yellow"))
         self.fog = fog_layer(plan["seed"]) if "mist" in plan["particles"] else None
+        self.banners = [(t, self._banner(label)) for t, label in plan.get("chapters") or [] if t > 1]
         self.gi = 0
         self.cap_frames = 0
+
+    @staticmethod
+    def _banner(label):
+        """Chapter title banner for long-form videos."""
+        img = Image.new("RGBA", (W, 170), (0, 0, 0, 0))
+        d = ImageDraw.Draw(img)
+        f, lines, sz = wrap(label, W - 400, 64, 1)
+        tw = f.getlength(lines[0]) + 120
+        d.rounded_rectangle((W / 2 - tw / 2, 30, W / 2 + tw / 2, 140), 34, fill=(10, 10, 25, 200), outline=YELLOW + (255,),
+                            width=4)
+        d.text((W / 2, 85), lines[0], font=f, fill=YELLOW, anchor="mm")
+        return img
 
     def src(self, i):
         if i not in self.srcs:
@@ -376,7 +444,7 @@ class Frames:
         kind = p["particles"][i]
         if kind == "mist" and self.fog is not None:                 # drifting fog band low in the frame
             x = int(-((t * 30) % (self.fog.width - W)))
-            frame.paste(self.fog, (x, 1180), self.fog)
+            frame.paste(self.fog, (x, int(H * 0.61)), self.fog)
         draw_particles(frame, kind, t, p["seed"] + i)
         if p["emotions"][i] in FLICKER_EMO:
             a = flicker(t, p["seed"] + i)
@@ -391,6 +459,9 @@ class Frames:
             a = min(1.0, t / 0.15, (HOOK_T - t) / 0.35)
             frame.paste(self.hook_rgb, (0, 0), self.hook_a if a >= 1 else self.hook_a.point(lambda v, a=a: int(v * a)))
             return frame
+        for bt, banner in self.banners:                         # chapter titles (long-form)
+            if bt <= t < bt + 2.6:
+                frame.paste(banner, (0, int(H * 0.07)), banner)
         groups = p["groups"]
         while self.gi < len(groups) - 1 and t >= groups[self.gi + 1][0]:
             self.gi += 1
@@ -417,6 +488,7 @@ ENC = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-maxrate", "9M",
 
 def render_chunk(plan, f0, f1, out):
     """Renders frames [f0, f1) to a silent H.264 segment. Runs in a worker process."""
+    set_format(plan.get("fmt", "short"))
     fr = Frames(plan)
     cmd = ["ffmpeg", "-y", "-v", "error", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{W}x{H}", "-r", str(FPS),
            "-i", "-", *ENC, "-an", out]
@@ -437,7 +509,7 @@ def workers():
     return max(1, want or min(4, os.cpu_count() or 1))
 
 
-def render(vs, images, voices, work, out_path, music=None):
+def render(vs, images, voices, work, out_path, music=None, chapters=None):
     """vs: a video story from story.make_parts(); images: images.make_all(); voices: tts.speak_scenes().
     Returns metadata about the render (duration, frames, captions...)."""
     check_shaping()
@@ -457,7 +529,8 @@ def render(vs, images, voices, work, out_path, music=None):
     soundtrack.build([v[0] for v in voices], [s for s, _ in tl], total, mix, music=music,
                      voice_af=C.VOICE_FILTER if C.VOICE_FX and not C.OFFLINE and soundtrack_voice_is_edge() else None,
                      whoosh_at=[t for t in (twist_t, story_end) if t], boom_at=[twist_t] if twist_t else [],
-                     seed=int(vs.get("seed", 7)) % 1000, lift_at=twist_t, ambience=amb, hits=hits)
+                     seed=int(vs.get("seed", 7)) % 1000, lift_at=twist_t, ambience=amb, hits=hits,
+                     mood=(vs.get("variety") or {}).get("music", "mystery"))
     lufs = soundtrack.loudnorm(mix, norm)
     log(f"   {len(amb)} ambience beds + {len(hits)} effects · loudness {lufs} LUFS (target {C.TARGET_LUFS})")
 
@@ -467,7 +540,9 @@ def render(vs, images, voices, work, out_path, music=None):
             "tl": tl, "story_end": story_end, "twist_i": twist_i, "groups": groups,
             "hook": vs.get("hook") or vs["title"], "badge": {1: "PART 1", 2: "PART 2"}.get(vs.get("part")),
             "end_card": vs.get("end_card", "cta"), "seed": int(vs.get("seed", 7)) % 10000,
-            "vs": {k: vs.get(k) for k in ("cta_question", "title")}}
+            "caption": (vs.get("variety") or {}).get("caption", "yellow"), "fmt": FMT,
+            "chapters": [(tl[i][0], label) for i, label in (chapters or [])],
+            "vs": {k: vs.get(k) for k in ("cta_question", "title", "platform", "part2_when")}}
     n = int(round(total * FPS))
     k = min(workers(), max(1, n // 300))
     bounds = [round(n * j / k) for j in range(k + 1)]

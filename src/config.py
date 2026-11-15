@@ -35,19 +35,41 @@ TELEGRAM_COMMANDS = flag("TELEGRAM_COMMANDS", "true")
 # REVIEW_MODE: auto             -> posts by itself at the slot time
 #              auto_unless_skip -> posts at the slot unless you send /skip in Telegram
 #              approve          -> posts at/after the slot only once you send /post in Telegram
-REVIEW_MODE  = (env("REVIEW_MODE", "auto_unless_skip") or "auto_unless_skip").strip().lower()
+# REVIEW_MODE: phase            -> approve (with timeout) for the first REVIEW_DAYS days after START_DATE,
+#                                   then auto_unless_skip  (default)
+#              approve          -> posts at the slot once you tap ✅ Post; with APPROVAL_TIMEOUT=true it also posts
+#                                   at the slot when you did not answer (so a day is never missed)
+#              auto_unless_skip -> posts at the slot unless you tap 🗑 Skip
+#              auto             -> posts by itself
+REVIEW_MODE  = (env("REVIEW_MODE", "phase") or "phase").strip().lower()
+REVIEW_DAYS  = int(env("REVIEW_DAYS", "30") or 30)
+APPROVAL_TIMEOUT = flag("APPROVAL_TIMEOUT", "true")
 REVIEW_HOURS = float(env("REVIEW_HOURS", "2") or 2)   # auto_unless_skip: minimum time you get to /skip after the preview
+START_DATE   = env("START_DATE", "2026-11-15") or "2026-11-15"   # channel launch (phase 1 = first 30 days)
 
-# ---------------- Schedule ----------------
-POST_TIMES = [t.strip() for t in (env("POST_TIMES", "") or "19:00").split(",") if t.strip()]
+# ---------------- Schedule (Phase 1; phase 2 lets experiments.py move them) ----------------
 TIMEZONE           = env("TIMEZONE", "Asia/Kolkata") or "Asia/Kolkata"
-LATE_GRACE_MINUTES = int(env("LATE_GRACE_MINUTES", "180") or 180)   # a late video still posts up to 3 h after its slot
+YT_POST_TIMES = [t.strip() for t in (env("YT_POST_TIMES", "") or "08:00,19:30").split(",") if t.strip()]
+IG_POST_TIMES = [t.strip() for t in (env("IG_POST_TIMES", "") or "20:30").split(",") if t.strip()]
+LONGFORM_SLOT = tuple((env("LONGFORM_SLOT", "") or "sun 11:00").split())          # weekly long video
+DIRECTOR_TIME = env("DIRECTOR_TIME", "10:00") or "10:00"                         # daily premise options
+YT_SLOT_CANDIDATES = [t.strip() for t in (env("YT_SLOT_CANDIDATES", "") or "07:00,08:00,12:30,17:00,19:30,21:00").split(",")]
+IG_SLOT_CANDIDATES = [t.strip() for t in (env("IG_SLOT_CANDIDATES", "") or "19:00,20:30,21:30").split(",")]
+MAX_SHORTS_PER_DAY = int(env("MAX_SHORTS_PER_DAY", "3") or 3)
+QUALITY_MIN_PCT = float(env("QUALITY_MIN_PCT", "60") or 60)    # avg % viewed below this for a week -> 1 Short/day
+EXPLORATION = float(env("EXPLORATION", "0.2") or 0.2)
+PRODUCE_AHEAD_HOURS = float(env("PRODUCE_AHEAD_HOURS", "8") or 8)   # make each video up to 8 h before its slot
+PLATFORM = (env("PLATFORM", "both") or "both").strip().lower()    # yt | ig | both (workflow input)
+POST_TIMES = IG_POST_TIMES                                        # backwards compatibility
+LATE_GRACE_MINUTES = int(env("LATE_GRACE_MINUTES", "120") or 120)   # a late video still posts up to 2 h after its slot
 MAX_WAIT_MINUTES   = int(env("MAX_WAIT_MINUTES", "330") or 330)     # a job may sleep this long to hit the slot exactly
 
 # ---------------- The channel ----------------
 CHANNEL      = env("CHANNEL_NAME", "Raaz Kahani") or "Raaz Kahani"
 SERIES_EVERY = int(env("SERIES_EVERY", "3") or 3)           # every Nth story is a 2-part cliffhanger series (0 = never)
-MAX_SECONDS  = float(env("MAX_SECONDS", "150") or 150)
+MAX_SECONDS  = float(env("MAX_SECONDS", "172") or 172)               # hard cap; each length bucket has its own
+SIM_THRESHOLD = float(env("SIM_THRESHOLD", "0.80") or 0.80)           # reject premises more similar than this
+GEMINI_SIM_THRESHOLD = float(env("GEMINI_SIM_THRESHOLD", "0.88") or 0.88)   # same rule on Gemini's embedding scale
 MIN_SECONDS  = float(env("MIN_SECONDS", "60") or 60)
 THEME        = (env("THEME", "auto") or "auto").strip().lower()  # workflow_dispatch override
 # one look for the whole channel, prepended to EVERY image prompt (visual consistency)
@@ -100,3 +122,20 @@ HASHTAGS = ["#hindikahani", "#hindistory", "#raazkahani", "#mysterystory", "#fan
 YT_TAGS = ["hindi story", "hindi kahani", "mystery story", "fantasy story", "moral story", "ai animation",
            "raaz kahani", "hindi kahaniyan"]
 BRAND_TAG = "#" + re.sub(r"[^a-z0-9]", "", CHANNEL.lower())
+
+
+def days_live(today=None):
+    """Days since the channel's START_DATE (0 on launch day)."""
+    import datetime as dt
+    today = today or dt.date.today()
+    try:
+        return (today - dt.date.fromisoformat(START_DATE)).days
+    except ValueError:
+        return 999
+
+
+def review_mode(today=None):
+    """The review mode in force today (REVIEW_MODE=phase: approve for the first REVIEW_DAYS, then auto_unless_skip)."""
+    if REVIEW_MODE != "phase":
+        return REVIEW_MODE
+    return "approve" if days_live(today) < REVIEW_DAYS else "auto_unless_skip"

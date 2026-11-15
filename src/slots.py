@@ -1,6 +1,8 @@
-"""Posting-slot maths. Slots are the daily posting times (POST_TIMES, default 19:00 Asia/Kolkata).
-Every slot has a unique key, which makes the bot idempotent: one video per slot, ever.
-Key of the FIRST daily slot is the plain date ("2026-11-08"), later slots add the time ("2026-11-08-2100")."""
+"""Posting-slot maths, per platform. Every slot has a unique key "<date>-<platform>-<HHMM>" (e.g.
+"2026-11-16-yt-0800"), which makes the bot idempotent: one video per slot, ever.
+
+Platforms: yt (Shorts, YT_POST_TIMES), ig (Reels, IG_POST_TIMES), ytlong (weekly long-form, LONGFORM_SLOT).
+In phase 2 the experiment engine may choose the day's times (experiments.schedule)."""
 import datetime as dt
 import config as C
 
@@ -10,66 +12,81 @@ try:
 except Exception:                                   # no tz database: assume IST
     TZ = dt.timezone(dt.timedelta(hours=5, minutes=30))
 
+DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+
 
 def now():
     return dt.datetime.now(TZ)
 
 
-def times():
+def _parse(times):
     out = []
-    for t in C.POST_TIMES:
+    for t in times:
         h, m = (int(x) for x in t.split(":"))
         out.append(dt.time(h, m))
-    return sorted(out)
+    return sorted(set(out))
 
 
-def slot_on(day, idx=0):
-    """The posting datetime (tz-aware) of slot number `idx` on local date `day`."""
-    return dt.datetime.combine(day, times()[idx], tzinfo=TZ)
+def times(platform="ig", day=None):
+    """Posting times of `platform` on local date `day`."""
+    if platform == "ytlong":
+        d, t = C.LONGFORM_SLOT
+        return _parse([t]) if day is None or DAYS[day.weekday()] == d else []
+    if day is not None:
+        try:
+            import experiments
+            chosen = experiments.schedule(platform, day)
+            if chosen:
+                return _parse(chosen)
+        except Exception:
+            pass
+    return _parse(C.YT_POST_TIMES if platform == "yt" else C.IG_POST_TIMES)
 
 
-def index(slot):
-    t = slot.timetz().replace(tzinfo=None)
-    ts = times()
-    return ts.index(t) if t in ts else 0
+def key(slot, platform="ig"):
+    return f"{slot.date().isoformat()}-{platform}-{slot.strftime('%H%M')}"
 
 
-def key(slot):
-    i = index(slot)
-    return slot.date().isoformat() if i == 0 else f"{slot.date().isoformat()}-{slot.strftime('%H%M')}"
+def slots_between(platform, start, end):
+    """All slot datetimes of `platform` from `start` to `end` (tz-aware), oldest first."""
+    out, day = [], start.date() - dt.timedelta(days=1)
+    while day <= end.date():
+        for t in times(platform, day):
+            s = dt.datetime.combine(day, t, tzinfo=TZ)
+            if start <= s <= end:
+                out.append(s)
+        day += dt.timedelta(days=1)
+    return out
 
 
-def _all_around(at):
-    out = []
-    for d in (-1, 0, 1, 2):
-        day = at.date() + dt.timedelta(days=d)
-        out += [slot_on(day, i) for i in range(len(times()))]
-    return sorted(out)
+def grace_minutes():
+    return C.LATE_GRACE_MINUTES
 
 
-def grace_for(slot):
-    """How late a reel may still go out in this slot (never runs into the next slot)."""
-    ss = _all_around(slot)
-    nxt = next((s for s in ss if s > slot), slot + dt.timedelta(days=1))
-    gap = (nxt - slot).total_seconds() / 60
-    return max(30, min(C.LATE_GRACE_MINUTES, gap - 60))
-
-
-def upcoming_slot(at=None, done=(), grace_minutes=None):
-    """The next slot a reel made NOW should go out in, skipping slots whose key is in `done`.
-    A slot that passed less than its grace period ago still counts (a late reel beats no reel)."""
+def upcoming(platform, at=None, done=(), ahead_hours=None):
+    """Slots of `platform` that still need a video: not in `done`, not more than the grace period in the past,
+    and at most `ahead_hours` in the future. Oldest first."""
     at = at or now()
-    for s in _all_around(at):
-        g = grace_minutes if grace_minutes is not None else grace_for(s)
-        if s + dt.timedelta(minutes=g) >= at and key(s) not in done:
-            return s
-    return slot_on(at.date() + dt.timedelta(days=2))
+    ahead = C.PRODUCE_AHEAD_HOURS if ahead_hours is None else ahead_hours
+    start = at - dt.timedelta(minutes=grace_minutes())
+    return [s for s in slots_between(platform, start, at + dt.timedelta(hours=ahead)) if key(s, platform) not in done]
 
 
-def is_weekend(slot):
-    return slot.weekday() in (5, 6)                 # Saturday / Sunday of the POSTING day
+def next_slot(platform, after=None):
+    """The next slot of `platform` strictly after `after` (searches two weeks)."""
+    after = after or now()
+    later = slots_between(platform, after + dt.timedelta(seconds=1), after + dt.timedelta(days=14))
+    return later[0] if later else None
 
 
 def fmt(ts_or_dt):
     d = ts_or_dt if isinstance(ts_or_dt, dt.datetime) else dt.datetime.fromtimestamp(ts_or_dt, TZ)
     return d.astimezone(TZ).strftime("%a %d %b, %I:%M %p")
+
+
+def hindi_time(slot):
+    """'कल रात 8:30 बजे' style text for a slot (used on Part 1 end cards)."""
+    h, m = slot.hour, slot.minute
+    part = "सुबह" if h < 12 else "दोपहर" if h < 16 else "शाम" if h < 20 else "रात"
+    hh = h % 12 or 12
+    return f"कल {part} {hh}{':%02d' % m if m else ''} बजे"

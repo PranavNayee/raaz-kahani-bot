@@ -37,8 +37,13 @@ def _yt():
 
 def c_schedule():
     import slots
-    s = slots.upcoming_slot()
-    return f"next slot {slots.fmt(s)} ({C.TIMEZONE}), POST_TIMES {','.join(C.POST_TIMES)}, review mode '{C.REVIEW_MODE}'"
+    parts = []
+    for p, ok in (("yt", _yt()), ("ig", C.ig_enabled())):
+        if ok:
+            n = slots.next_slot(p)
+            parts.append(f"{p} next {slots.fmt(n)}" if n else f"{p} no slot")
+    return (f"{'; '.join(parts) or 'no platform'} ({C.TIMEZONE}); review mode today '{C.review_mode()}' "
+            f"(day {C.days_live()} since {C.START_DATE}); Telegram buttons {'on' if C.TELEGRAM_COMMANDS else 'off'}")
 
 
 def c_ffmpeg():

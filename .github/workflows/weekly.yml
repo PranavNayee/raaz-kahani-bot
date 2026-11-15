@@ -23,10 +23,10 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
         with:
-          python-version: "3.12"
+          python-version: "3.11"
           cache: pip
           cache-dependency-path: requirements.txt
-      - run: pip install requests
+      - run: pip install requests jsonschema
       - run: python src/weekly.py
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -41,6 +41,10 @@ jobs:
           YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
           YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
           TIMEZONE: ${{ vars.TIMEZONE || 'Asia/Kolkata' }}
+          START_DATE: ${{ vars.START_DATE || '2026-11-15' }}
+          REVIEW_DAYS: ${{ vars.REVIEW_DAYS || '30' }}
+          IG_TOKEN_SET: ${{ vars.IG_TOKEN_SET }}
+          YT_POST_TIMES: ${{ vars.YT_POST_TIMES || '08:00,19:30' }}
           FORCE_REPORT: ${{ inputs.force || 'false' }}
           PYTHONPATH: src
       - name: Heartbeat commit (GitHub pauses schedules after 60 days without commits)

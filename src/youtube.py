@@ -176,3 +176,40 @@ def set_thumbnail(video_id, jpg_path, tok=None):
     except Exception as e:
         log("Thumbnail not set (harmless):", e)
         return False
+
+
+def comment(video_id, text):
+    """Posts the story question as a top-level comment. (Pinning/hearting has no API: do it in YouTube Studio.)"""
+    try:
+        _api("POST", "commentThreads", params={"part": "snippet"},
+             json={"snippet": {"videoId": video_id, "topLevelComment": {"snippet": {"textOriginal": text[:2000]}}}})
+        log("Story-question comment posted (pin it in YouTube Studio)")
+        return True
+    except Exception as e:
+        log("Comment skipped:", e)
+        return False
+
+
+ANALYTICS = "https://youtubeanalytics.googleapis.com/v2/reports"
+
+
+def analytics(start, end, metrics, dimensions=None, filters=None, sort=None, max_results=None):
+    """YouTube Analytics API (needs the yt-analytics.readonly scope - re-run tools/youtube_auth.py once).
+    Returns a list of row dicts."""
+    params = {"ids": "channel==MINE", "startDate": start, "endDate": end, "metrics": metrics}
+    for k, v in (("dimensions", dimensions), ("filters", filters), ("sort", sort), ("maxResults", max_results)):
+        if v:
+            params[k] = v
+    r = requests.get(ANALYTICS, params=params, headers={"Authorization": f"Bearer {_access_token()}"}, timeout=60)
+    if r.status_code >= 300:
+        raise RuntimeError(f"YouTube Analytics {r.status_code}: {r.text[:200]}")
+    j = r.json()
+    cols = [c["name"] for c in j.get("columnHeaders", [])]
+    return [dict(zip(cols, row)) for row in j.get("rows", [])]
+
+
+def channel_stats():
+    it = _api("GET", "channels", params={"part": "statistics", "mine": "true"}).get("items", [])
+    s = it[0]["statistics"] if it else {}
+    return {"subscribers": int(s.get("subscriberCount", 0)), "views": int(s.get("viewCount", 0)),
+            "videos": int(s.get("videoCount", 0))}

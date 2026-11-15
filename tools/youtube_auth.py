@@ -20,7 +20,8 @@ try:
 except ImportError:
     pass
 SCOPE = ("https://www.googleapis.com/auth/youtube.upload "      # upload Shorts
-         "https://www.googleapis.com/auth/youtube.force-ssl")    # playlists + replying to comments
+         "https://www.googleapis.com/auth/youtube.force-ssl "     # playlists + comments
+         "https://www.googleapis.com/auth/yt-analytics.readonly")  # retention + watch hours for the growth engine
 
 
 def main():

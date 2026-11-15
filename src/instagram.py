@@ -123,3 +123,26 @@ def token_scopes():
         return set((j.get("data") or {}).get("scopes") or [])
     except Exception:
         return set()
+
+
+def post_story(image_url):
+    """Shares an image to the account's Stories (business/creator accounts with content publishing).
+    The API cannot add stickers, so the question is written on the image itself."""
+    uid, tok = C.IG_USER_ID(), C.IG_ACCESS_TOKEN()
+    cid = _check(requests.post(f"{graph()}/{uid}/media", data={"media_type": "STORIES", "image_url": image_url,
+                                                             "access_token": tok}, timeout=60))["id"]
+    for _ in range(20):
+        time.sleep(6)
+        s = _check(requests.get(f"{graph()}/{cid}", params={"fields": "status_code", "access_token": tok}, timeout=60))
+        if s.get("status_code") == "FINISHED":
+            break
+        if s.get("status_code") in ("ERROR", "EXPIRED"):
+            raise RuntimeError(f"story processing failed: {s}")
+    return _check(requests.post(f"{graph()}/{uid}/media_publish", data={"creation_id": cid, "access_token": tok},
+                                timeout=60))["id"]
+
+
+def followers():
+    j = _check(requests.get(f"{graph()}/{C.IG_USER_ID()}", params={"fields": "followers_count,media_count",
+               "access_token": C.IG_ACCESS_TOKEN()}, timeout=60))
+    return j.get("followers_count"), j.get("media_count")

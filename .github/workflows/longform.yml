@@ -1,0 +1,69 @@
+name: Weekly long video
+# Saturday 20:00 IST (+ Sunday 02:00 backup): one ORIGINAL 8-12 min 16:9 story with chapters and its own thumbnail,
+# queued for Sunday 11:00 IST with approval buttons. Needs YouTube connected.
+on:
+  schedule:
+    - cron: "30 14 * * 6"
+    - cron: "30 20 * * 6"
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: video-longform
+  cancel-in-progress: false
+jobs:
+  long:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    env:
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+      SUPABASE_BUCKET: ${{ secrets.SUPABASE_BUCKET }}
+      IG_USER_ID: ${{ secrets.IG_USER_ID }}
+      IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+      IG_TOKEN_SET: ${{ vars.IG_TOKEN_SET }}
+      YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
+      YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
+      YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
+      POLLINATIONS_TOKEN: ${{ secrets.POLLINATIONS_TOKEN }}
+      ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
+      TIMEZONE: ${{ vars.TIMEZONE || 'Asia/Kolkata' }}
+      START_DATE: ${{ vars.START_DATE || '2026-11-15' }}
+      REVIEW_MODE: ${{ vars.REVIEW_MODE || 'phase' }}
+      REVIEW_DAYS: ${{ vars.REVIEW_DAYS || '30' }}
+      APPROVAL_TIMEOUT: ${{ vars.APPROVAL_TIMEOUT || 'true' }}
+      TELEGRAM_COMMANDS: ${{ vars.TELEGRAM_COMMANDS || 'true' }}
+      YT_POST_TIMES: ${{ vars.YT_POST_TIMES || '08:00,19:30' }}
+      IG_POST_TIMES: ${{ vars.IG_POST_TIMES || '20:30' }}
+      LONGFORM_SLOT: ${{ vars.LONGFORM_SLOT || 'sun 11:00' }}
+      DIRECTOR_TIME: ${{ vars.DIRECTOR_TIME || '10:00' }}
+      YT_PRIVACY: ${{ vars.YT_PRIVACY || 'public' }}
+      SERIES_EVERY: ${{ vars.SERIES_EVERY || '3' }}
+      TTS_PROVIDER: ${{ vars.TTS_PROVIDER || 'auto' }}
+      GEMINI_VOICE: ${{ vars.GEMINI_VOICE || 'Charon' }}
+      GEMINI_VOICE_FEMALE: ${{ vars.GEMINI_VOICE_FEMALE || 'Kore' }}
+      VOICE_SPEED: ${{ vars.VOICE_SPEED || '1.1' }}
+      ELEVENLABS_VOICE_ID: ${{ vars.ELEVENLABS_VOICE_ID }}
+      IMAGE_PROVIDERS: ${{ vars.IMAGE_PROVIDERS || 'gemini,pollinations' }}
+      REQUIRE_RAQM: "true"
+      PYTHONPATH: src
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/media
+          key: media-v1
+      - name: Install ffmpeg + text shaping
+        timeout-minutes: 12
+        run: bash .github/setup-media.sh
+      - run: pip install -r requirements.txt
+      - run: python src/longform.py

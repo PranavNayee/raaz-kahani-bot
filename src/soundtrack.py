@@ -31,17 +31,30 @@ def _smooth(x, n):
     return np.convolve(x, k, mode="same")
 
 
-def synth_bed(seconds, sr=SR, seed=7, lift_at=None):
+def synth_bed(seconds, sr=SR, seed=7, lift_at=None, mood="mystery"):
     """Mysterious minor pad + low drone + sparse music-box plucks; after `lift_at` seconds it lifts to a warm
     major progression for the payoff. Generated here, so it is royalty-free."""
     rng = random.Random(seed)
     n = int(seconds * sr)
     t = np.arange(n, dtype=np.float32) / sr
+    out = np.zeros(n, dtype=np.float32)
     dark = [[57, 60, 64], [53, 57, 60], [50, 53, 57], [52, 56, 59]]          # Am F Dm E
     warm = [[48, 52, 55], [55, 59, 62], [57, 60, 64], [53, 57, 60]]          # C G Am F
     bar = 4.0
+    if mood == "folk":                                                       # pentatonic, lighter and quicker
+        dark = [[50, 53, 57], [48, 52, 55], [50, 55, 57], [45, 50, 53]]
+        bar = 3.0
+    elif mood == "suspense":                                                 # low, tight, with a pulse
+        dark = [[52, 55, 59], [52, 55, 60], [50, 53, 57], [52, 55, 59]]
+        bar = 3.4
+        pulse_hz = 440.0 * 2 ** ((40 - 69) / 12)
+        for k in range(int(seconds / (bar / 8))):
+            st = int(k * bar / 8 * sr)
+            if st >= n or (lift_at is not None and k * bar / 8 >= lift_at):
+                break
+            ln = min(int(0.16 * sr), n - st); tt = np.arange(ln, dtype=np.float32) / sr
+            out[st:st + ln] += 0.05 * np.sin(2 * np.pi * pulse_hz * tt) * np.exp(-tt * 18)
     hz = lambda m: 440.0 * 2 ** ((m - 69) / 12)
-    out = np.zeros(n, dtype=np.float32)
     out += 0.018 * np.sin(2 * np.pi * hz(33) * t) * (0.7 + 0.3 * np.sin(2 * np.pi * 0.07 * t))   # A1 drone
     nb = int(seconds / bar) + 2
     for b in range(nb):
@@ -60,9 +73,10 @@ def synth_bed(seconds, sr=SR, seed=7, lift_at=None):
                 f = hz(m - 12) * (1 + det)
                 pad += np.sin(2 * np.pi * f * seg) + 0.2 * np.sin(4 * np.pi * f * seg)
         out[s0:s1] += (0.03 if lifted else 0.026) * pad * env
-        for k in range(4 if not lifted else 8):                                # music-box plucks
-            if rng.random() < (0.45 if not lifted else 0.8):
-                st = int((b * bar + k * bar / (4 if not lifted else 8)) * sr)
+        steps = 8 if (lifted or mood == "folk") else 4
+        for k in range(steps):                                                 # music-box plucks
+            if rng.random() < (0.45 if steps == 4 else 0.75):
+                st = int((b * bar + k * bar / steps) * sr)
                 if st >= n:
                     break
                 m = chord[rng.randrange(3)] + 24
@@ -81,7 +95,7 @@ def music_files(music_dir=None):
     return sorted(f for ext in ("mp3", "wav", "m4a", "ogg") for f in glob.glob(os.path.join(music_dir, f"*.{ext}")))
 
 
-def _music(seconds, music_dir, seed, lift_at):
+def _music(seconds, music_dir, seed, lift_at, mood="mystery"):
     files = music_files(music_dir)
     n = int(seconds * SR)
     if files:
@@ -98,7 +112,7 @@ def _music(seconds, music_dir, seed, lift_at):
             return x
         except Exception as e:
             log("Music file failed, using generated bed:", e)
-    return synth_bed(seconds, seed=seed, lift_at=lift_at)
+    return synth_bed(seconds, seed=seed, lift_at=lift_at, mood=mood)
 
 
 def whoosh(sr=SR, dur=0.5, seed=3):
@@ -127,7 +141,7 @@ def boom(sr=SR, dur=1.4):
 
 
 def build(voice_clips, starts, total, out_wav, music=True, music_dir=None, voice_af=None, whoosh_at=(), boom_at=(),
-          seed=7, lift_at=None, ambience=(), hits=()):
+          seed=7, lift_at=None, ambience=(), hits=(), mood="mystery"):
     """voice_clips: audio paths; starts: start second of each clip; total: video length. Writes a mono wav."""
     n = int(round(total * SR))
     voice = np.zeros(n, dtype=np.float32)
@@ -138,7 +152,7 @@ def build(voice_clips, starts, total, out_wav, music=True, music_dir=None, voice
         if e > s:
             voice[s:e] += x[:e - s]
     mix = voice.copy()
-    bed = _music(total, music_dir, seed, lift_at) if music else np.zeros(n, np.float32)
+    bed = _music(total, music_dir, seed, lift_at, mood) if music else np.zeros(n, np.float32)
     bed = np.pad(bed, (0, max(0, n - len(bed))))[:n]
     for st, x in ambience:                                                # night/wind/rain/heartbeat beds
         a = int(st * SR); e = min(n, a + len(x))

@@ -10,7 +10,6 @@ from util import log
 
 MAX_REPLIES = int(os.environ.get("MAX_REPLIES_PER_RUN", "12") or 12)
 YT_DAILY_REPLIES = int(os.environ.get("YT_DAILY_REPLIES", "40") or 40)    # 40 x 50 units = 2,000 of 10,000/day
-METRICS = ["views", "reach", "likes", "comments", "shares", "saved", "total_interactions", "ig_reels_avg_watch_time"]
 FALLBACK_METRICS = ["reach", "likes", "comments", "shares", "saved"]
 
 
@@ -22,7 +21,7 @@ def _get(path, **params):
 
 def media_insights(mid):
     last = None
-    for metrics in (METRICS, FALLBACK_METRICS):
+    for metrics in (METRICS, METRICS[:-1], FALLBACK_METRICS):      # 'follows' isn't available on every account
         try:
             j = _get(f"{mid}/insights", metric=",".join(metrics))
             return {d["name"]: (d.get("values") or [{}])[0].get("value", 0) for d in j.get("data", [])}
@@ -43,37 +42,96 @@ def views(s):
     return (s.get("ig") or {}).get("views", (s.get("ig") or {}).get("reach", 0)) + (s.get("yt") or {}).get("views", 0)
 
 
-def refresh_stats(limit=30):
+METRICS = ["views", "reach", "likes", "comments", "shares", "saved", "total_interactions", "ig_reels_avg_watch_time",
+           "follows"]
+
+
+def yt_retention(ids, start):
+    """{video_id: {avg_pct, avg_secs, shares, subs}} from the YouTube Analytics API (empty without the scope)."""
+    out = {}
+    ids = [i for i in ids if i]
+    for k in range(0, len(ids), 40):
+        rows = youtube.analytics(start, time.strftime("%Y-%m-%d"),
+                                 "views,averageViewPercentage,averageViewDuration,shares,subscribersGained",
+                                 dimensions="video", filters="video==" + ",".join(ids[k:k + 40]))
+        for r in rows:
+            out[r["video"]] = {"avg_pct": r.get("averageViewPercentage"), "avg_secs": r.get("averageViewDuration"),
+                               "shares": r.get("shares"), "follows": r.get("subscribersGained")}
+    return out
+
+
+def refresh_stats(limit=40):
+    """Pulls every posted video's numbers into stats.json, keyed by slot, and freezes a 72-hour snapshot (m72)
+    that the experiment engine learns from."""
     history = storage.get_json("history.json", [])
     stats = storage.get_json("stats.json", {})
-    posted = [h for h in history if h.get("media_id") or h.get("youtube_id")][-limit:]
+    posted = [h for h in history if h.get("kind", "story") == "story" and (h.get("media_id") or h.get("youtube_id"))][-limit:]
     ok, err = 0, None
-    yt = {}
+    yt, ret = {}, {}
     if youtube.enabled():
+        ids = [h.get("youtube_id") for h in posted]
         try:
-            yt = youtube.video_stats([h.get("youtube_id") for h in posted])
+            yt = youtube.video_stats(ids)
         except Exception as e:
             err = f"YouTube stats: {e}"
+        try:
+            first = min((h.get("posted_ts") or time.time()) for h in posted) if posted else time.time()
+            ret = yt_retention(ids, time.strftime("%Y-%m-%d", time.gmtime(first - 86400)))
+        except Exception as e:
+            err = f"YouTube Analytics (re-run tools/youtube_auth.py to grant it): {str(e)[:150]}"
     for h in posted:
         key = h.get("slot") or str(h.get("media_id"))
+        plat = h.get("platform", "ig")
         row = {**stats.get(key, {}), "title": h.get("title"), "hook": h.get("hook", ""), "theme": h.get("theme"),
                "hook_type": h.get("hook_type"), "part": h.get("part"), "posted_ts": h.get("posted_ts"),
-               "media_id": h.get("media_id"), "youtube_id": h.get("youtube_id")}
+               "media_id": h.get("media_id"), "youtube_id": h.get("youtube_id"), "platform": plat, "slot": key,
+               "variety": h.get("variety"), "length": h.get("length"), "narrator": h.get("narrator"),
+               "duration": h.get("duration")}
         got = False
-        if C.ig_enabled() and str(h.get("media_id", "")).isdigit():
+        if plat == "ig" and C.ig_enabled() and str(h.get("media_id", "")).isdigit():
             try:
                 row["ig"] = media_insights(str(h["media_id"])); got = True
             except RuntimeError as e:
                 err = str(e)
         if h.get("youtube_id") in yt:
-            row["yt"] = yt[h["youtube_id"]]; got = True
+            row["yt"] = {**yt[h["youtube_id"]], **ret.get(h["youtube_id"], {})}; got = True
         if got:
             row["updated"] = int(time.time()); row["score"] = round(score(row), 1)
+            age = time.time() - (h.get("posted_ts") or time.time())
+            if age >= 72 * 3600 and not row.get("m72"):            # freeze the 72-hour result once
+                m = row.get("yt") if plat in ("yt", "ytlong") else row.get("ig") or {}
+                watch = (m.get("ig_reels_avg_watch_time") or 0) / 1000.0
+                pct = m.get("avg_pct") or (100.0 * watch / h["duration"] if watch and h.get("duration") else 0)
+                row["m72"] = {"views": m.get("views", m.get("reach", 0)) or 0, "avg_pct": round(pct or 0, 1),
+                              "shares": m.get("shares", 0) or 0, "follows": m.get("follows", 0) or 0}
             stats[key] = row; ok += 1
     if ok:
         storage.put_json("stats.json", stats)
     log(f"Stats refreshed for {ok}/{len(posted)} videos" + (f" (last error: {err[:150]})" if err else ""))
     return stats, (err if not ok and posted else None)
+
+
+def snapshot_followers():
+    """Once a day: followers / subscribers / channel totals, for the weekly projections."""
+    snaps = storage.get_json("growth_log.json", [])
+    day = slots.now().strftime("%Y-%m-%d")
+    if snaps and snaps[-1].get("day") == day:
+        return snaps
+    row = {"day": day}
+    if C.ig_enabled():
+        try:
+            import instagram
+            row["ig_followers"], row["ig_media"] = instagram.followers()
+        except Exception as e:
+            log("IG followers unavailable:", e)
+    if youtube.enabled():
+        try:
+            row.update({f"yt_{k}": v for k, v in youtube.channel_stats().items()})
+        except Exception as e:
+            log("YT channel stats unavailable:", e)
+    snaps.append(row)
+    storage.put_json("growth_log.json", snaps[-400:])
+    return snaps
 
 
 def _rows():
@@ -126,7 +184,22 @@ def _write_reply(h, user, text):
     d = llm.generate_json(REPLY_PROMPT.format(name=C.CHANNEL, title=h.get("title", ""), part=part, user=user,
                                               text=text[:500], spoiler=spoiler), temperature=0.6)
     msg = re.sub(r"https?://\S+", "", str(d.get("text", ""))).strip()[:300]
-    return msg if d.get("reply") and msg else None
+    if not (d.get("reply") and msg):
+        return None
+    eng = storage.get_json("engage.json", {})
+    sent = set(eng.get("reply_texts", []))
+    norm = re.sub(r"\W+", "", msg.lower())
+    if norm in sent:                                      # never the same reply twice
+        d = llm.generate_json(REPLY_PROMPT.format(name=C.CHANNEL, title=h.get("title", ""), part=part, user=user,
+                                                  text=text[:500], spoiler=spoiler) +
+                              f"\nDo NOT use this wording again: {msg}", temperature=0.9)
+        msg = re.sub(r"https?://\S+", "", str(d.get("text", ""))).strip()[:300]
+        norm = re.sub(r"\W+", "", msg.lower())
+        if not d.get("reply") or not msg or norm in sent:
+            return None
+    eng["reply_texts"] = (eng.get("reply_texts", []) + [norm])[-2000:]
+    storage.put_json("engage.json", eng)
+    return msg
 
 
 def _ig_reply(cid, message):
@@ -228,6 +301,10 @@ def yt_reply_comments(budget):
 
 def main():
     notes = []
+    try:
+        snapshot_followers()
+    except Exception as e:
+        log("Follower snapshot skipped:", e)
     _, err = refresh_stats()
     if err:
         notes.append(f"Video stats unavailable: {err[:200]}\n→ Instagram needs 'instagram_manage_insights'.")

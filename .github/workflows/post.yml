@@ -1,14 +1,13 @@
-name: Post queued video
-# Light job (no rendering): publishes the queued video at its slot time. Runs every 20 min because GitHub skips
-# many scheduled runs; a run that starts within 5.5 h of the slot sleeps and posts exactly on time.
-# Never posts twice: a storage lock + per-platform progress + a check of each account's latest posts.
+name: Post queued videos
+# Light job (no rendering), every 20 min: reads your Telegram taps (premise picks, notes, ✅/🔁/🗑) and posts every
+# queued video at its slot. A run that starts within 5.5 h of a slot sleeps and posts exactly on time.
 on:
   schedule:
     - cron: "4,24,44 * * * *"
   workflow_dispatch:
     inputs:
       force_post:
-        description: "Post the queued video NOW (ignores the slot time, approval and retry limit)"
+        description: "Post the queued videos NOW (ignores slot time and approval)"
         type: boolean
         default: false
 permissions:
@@ -20,31 +19,42 @@ jobs:
   post:
     runs-on: ubuntu-latest
     timeout-minutes: 345
+    env:
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+      SUPABASE_BUCKET: ${{ secrets.SUPABASE_BUCKET }}
+      IG_USER_ID: ${{ secrets.IG_USER_ID }}
+      IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+      IG_TOKEN_SET: ${{ vars.IG_TOKEN_SET }}
+      YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
+      YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
+      YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
+      POLLINATIONS_TOKEN: ${{ secrets.POLLINATIONS_TOKEN }}
+      ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
+      TIMEZONE: ${{ vars.TIMEZONE || 'Asia/Kolkata' }}
+      START_DATE: ${{ vars.START_DATE || '2026-11-15' }}
+      REVIEW_MODE: ${{ vars.REVIEW_MODE || 'phase' }}
+      REVIEW_DAYS: ${{ vars.REVIEW_DAYS || '30' }}
+      APPROVAL_TIMEOUT: ${{ vars.APPROVAL_TIMEOUT || 'true' }}
+      TELEGRAM_COMMANDS: ${{ vars.TELEGRAM_COMMANDS || 'true' }}
+      YT_POST_TIMES: ${{ vars.YT_POST_TIMES || '08:00,19:30' }}
+      IG_POST_TIMES: ${{ vars.IG_POST_TIMES || '20:30' }}
+      LONGFORM_SLOT: ${{ vars.LONGFORM_SLOT || 'sun 11:00' }}
+      DIRECTOR_TIME: ${{ vars.DIRECTOR_TIME || '10:00' }}
+      YT_PRIVACY: ${{ vars.YT_PRIVACY || 'public' }}
+      SERIES_EVERY: ${{ vars.SERIES_EVERY || '3' }}
+      FORCE_POST: ${{ inputs.force_post || 'false' }}
+      PYTHONPATH: src
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
         with:
-          python-version: "3.12"
+          python-version: "3.11"
           cache: pip
           cache-dependency-path: requirements.txt
-      - run: pip install requests
+      - run: pip install requests jsonschema
       - run: python src/post_pending.py
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          TELEGRAM_COMMANDS: ${{ vars.TELEGRAM_COMMANDS || 'true' }}
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-          SUPABASE_BUCKET: ${{ secrets.SUPABASE_BUCKET }}
-          IG_USER_ID: ${{ secrets.IG_USER_ID }}
-          IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
-          YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
-          YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
-          YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
-          POST_TIMES: ${{ vars.POST_TIMES || '19:00' }}
-          TIMEZONE: ${{ vars.TIMEZONE || 'Asia/Kolkata' }}
-          REVIEW_MODE: ${{ vars.REVIEW_MODE || 'auto_unless_skip' }}
-          REVIEW_HOURS: ${{ vars.REVIEW_HOURS || '2' }}
-          YT_PRIVACY: ${{ vars.YT_PRIVACY || 'public' }}
-          FORCE_POST: ${{ inputs.force_post || 'false' }}
-          PYTHONPATH: src

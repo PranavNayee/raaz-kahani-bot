@@ -8,7 +8,7 @@ clever twist, payoff, moral and a comment question.
   * every SERIES_EVERY-th story is a 2-part cliffhanger: Part 1 stops right before the twist, Part 2 posts next day
 """
 import hashlib, json, re
-import config as C, llm
+import config as C, llm, variety as V, similarity
 from util import log
 
 try:
@@ -55,7 +55,7 @@ SCHEMA = {
                            "gender": {"enum": ["male", "female", "other"]},
                            "visual_bible": {"type": "string", "minLength": 20, "maxLength": 400}}}},
         "style_bible": {"type": "string"},
-        "scenes": {"type": "array", "minItems": 8, "maxItems": 24, "items": {
+        "scenes": {"type": "array", "minItems": 6, "maxItems": 24, "items": {
             "type": "object", "required": ["id", "narration_hi", "speaker", "image_prompt", "emotion", "seconds"],
             "properties": {"id": {"type": "integer", "minimum": 1},
                            "narration_hi": {"type": "string", "minLength": 8, "maxLength": 400},
@@ -82,7 +82,9 @@ PROMPT = """You are the head writer of "{channel}", a hugely popular Hindi story
 Instagram Reels. Write ONE brand-new, 100% ORIGINAL animated mystery/fantasy story in natural spoken Hindi.
 
 THEME for this story: {theme_label}
-{series_block}
+{director_block}{series_block}
+STORY SHAPE for this one (keep the hook first and a real twist): {structure_rule}
+
 STRUCTURE (strict):
 1. HOOK - scene 1, under 2.5 seconds spoken (max 14 words): one shocking line. Pattern:
    "<impossible thing happens regularly>! Lekin <ordinary hero> ne <discovered/broke> <the secret>!"
@@ -110,7 +112,8 @@ VISUALS (an AI image model draws one picture per scene, the SAME characters must
   and colours, one signature item). Use simple lowercase ids like "meera", "seth".
 - image_prompt (English): describe ONLY this scene's action, setting, camera angle (close-up / wide / low angle),
   lighting and mood. Refer to characters by name. No text, letters or signs in the picture.
-- style_bible: one short English line for this story's colour palette and mood (the channel look is added for you).
+- The pictures will be drawn in this style: {style_hint}. Write image prompts that suit it.
+- style_bible: one short English line for this story's colour palette and mood (the style above is added for you).
 
 Return ONLY this JSON:
 {{"title": "the hook line in Roman Hinglish, max 90 chars, may end with one emoji like 😱",
@@ -129,8 +132,8 @@ Return ONLY this JSON:
 
 SERIES_BLOCK = """
 THIS IS A 2-PART SERIES. Write the WHOLE story ({n_min}-{n_max} scenes) in one go. It will be cut in two videos:
-Part 1 = scenes before "twist_scene" (must be 8-13 scenes and end on a nail-biting cliffhanger right before the twist),
-Part 2 = a short recap scene ("recap_hi") + the twist and everything after it (at least 7 scenes: twist, how the hero's
+Part 1 = scenes before "twist_scene" (must be 7-11 scenes and end on a nail-biting cliffhanger right before the twist),
+Part 2 = a short recap scene ("recap_hi") + the twist and everything after it (at least 6 scenes: twist, how the hero's
 plan works, the antagonist's downfall, the payoff, the moral + comment question).
 """
 SERIES_FIELDS = """
@@ -142,18 +145,36 @@ def _past_premises(history, n=40):
     return [h["premise"] for h in history if h.get("premise")][-n:]
 
 
-def build_prompt(theme, history, series=False):
+# length buckets: (min scenes, max scenes, min words, max words, seconds label, max seconds)
+LENGTHS = {"short": (7, 9, 90, 135, "45-60", 62), "mid": (8, 11, 125, 195, "60-90", 92),
+           "long": (12, 16, 245, 345, "120-170", 172)}
+SERIES_SCENES = (14, 22)
+
+
+def build_prompt(theme, history, series=False, length="mid", variety=None, direction=None):
     past = _past_premises(history)
-    n_min, n_max = (16, 22) if series else (8, 14)
-    length = ("Whole story: 16-22 scenes, 300-480 words in total." if series else
-              f"Whole story: {n_min}-{n_max} scenes, 150-250 words in total (about 70-{int(C.MAX_SECONDS) - 20} seconds).")
+    lo, hi, wlo, whi, secs, _ = LENGTHS.get(length, LENGTHS["mid"])
+    n_min, n_max = SERIES_SCENES if series else (lo, hi)
+    length_rule = ("Whole story: 14-22 scenes, 250-390 words in total (each part about 60-90 seconds)." if series else
+                   f"Whole story: {lo}-{hi} scenes, {wlo + 10}-{whi - 10} words in total (about {secs} seconds).")
+    v = variety or {}
+    director = ""
+    if direction:
+        director = ("\nTHE OWNER (the channel's creative director) chose this idea - build the story around it, keep "
+                    f"its core: {direction.get('premise') or direction.get('idea')}\n")
+        if direction.get("hook"):
+            director += f"Suggested hook (improve it if you can): {direction['hook']}\n"
+        if direction.get("note"):
+            director += f"Owner's note - follow it: {direction['note']}\n"
     winners = ""
     if WINNERS:
         winners = (f"\nOur audience loved these hooks most - match their energy and specificity (do NOT copy them): "
                    f"{WINNERS}\n")
-    return PROMPT.format(channel=C.CHANNEL, theme_label=THEMES.get(theme, theme),
+    return PROMPT.format(channel=C.CHANNEL, theme_label=THEMES.get(theme, theme), director_block=director,
+                         structure_rule=V.STRUCTURES.get(v.get("structure"), V.STRUCTURES["classic"]),
+                         style_hint=V.STYLES.get(v.get("style"), C.STYLE_BIBLE),
                          series_block=SERIES_BLOCK.format(n_min=n_min, n_max=n_max) if series else "",
-                         length_rule=length, past="; ".join(past) if past else "(none yet)", winners=winners,
+                         length_rule=length_rule, past="; ".join(past) if past else "(none yet)", winners=winners,
                          hook_types=", ".join(HOOK_TYPES), emotions=", ".join(EMOTIONS),
                          series_fields=SERIES_FIELDS if series else "")
 
@@ -172,7 +193,7 @@ def similar(a, b):
     return len(ta & tb) / max(1, len(ta | tb))
 
 
-def validate(s, history=(), series=False):
+def validate(s, history=(), series=False, length="mid"):
     """Raises ValueError with a clear reason (fed back to the model) or returns the cleaned story."""
     if not isinstance(s, dict):
         raise ValueError("answer is not a JSON object")
@@ -188,7 +209,8 @@ def validate(s, history=(), series=False):
         if k not in s:
             raise ValueError(f"missing field {k}")
     sc = s["scenes"]
-    n_min, n_max = (16, 24) if series else (8, 14)
+    lo, hi, wlo, whi, _, max_s = LENGTHS.get(length, LENGTHS["mid"])
+    n_min, n_max = (SERIES_SCENES[0], SERIES_SCENES[1] + 2) if series else (lo, hi + 2)
     if not n_min <= len(sc) <= n_max:
         raise ValueError(f"need {n_min}-{n_max} scenes, got {len(sc)}")
     ids = [x["id"] for x in sc]
@@ -214,18 +236,18 @@ def validate(s, history=(), series=False):
         raise ValueError(f"twist_scene {tw} must point at a scene in the second half (4..{len(sc) - 1})")
     total = sum(_words(x["narration_hi"]) for x in sc)
     if series:
-        if not 9 <= tw <= 14:
-            raise ValueError(f"series: twist_scene must be 9-14 so Part 1 has 8-13 scenes, got {tw}")
-        if len(sc) - tw + 1 < 7:
-            raise ValueError("series: Part 2 (twist onwards) needs at least 7 scenes")
+        if not 8 <= tw <= 12:
+            raise ValueError(f"series: twist_scene must be 8-12 so Part 1 has 7-11 scenes, got {tw}")
+        if len(sc) - tw + 1 < 6:
+            raise ValueError("series: Part 2 (twist onwards) needs at least 6 scenes")
         if not s.get("recap_hi") or len(DEVANAGARI.findall(s["recap_hi"])) < 10:
             raise ValueError("series: recap_hi (Devanagari) is required")
         for part in (sc[:tw - 1], sc[tw - 1:]):
             w = sum(_words(x["narration_hi"]) for x in part)
-            if w > C.MAX_SECONDS * 1.95:
-                raise ValueError(f"series part too long ({w} words)")
-    elif not 125 <= total <= C.MAX_SECONDS * 1.95:
-        raise ValueError(f"story length {total} words - needs 150-250 words")
+            if w > 215:
+                raise ValueError(f"series part too long ({w} words, max 200 per part)")
+    elif not wlo <= total <= whi:
+        raise ValueError(f"story length {total} words - needs {wlo + 10}-{whi - 10} words")
     blob = json.dumps(s, ensure_ascii=False)
     m = BANNED.search(blob)
     if m:
@@ -235,20 +257,22 @@ def validate(s, history=(), series=False):
             raise ValueError(f"premise too close to an old story: {h['premise'][:80]}")
     s["hook_type"] = s["hook_type"] if s["hook_type"] in HOOK_TYPES else "object_power"
     s["title"] = re.sub(r"\s+", " ", s["title"]).strip()
-    s["style_bible"] = (C.STYLE_BIBLE + ("; " + s["style_bible"][:160] if s.get("style_bible") else "")).strip()
+    s["mood_line"] = (s.get("style_bible") or "")[:160]
+    s["style_bible"] = (C.STYLE_BIBLE + ("; " + s["mood_line"] if s["mood_line"] else "")).strip()
     s["seed"] = int(hashlib.sha1(s["premise"].encode()).hexdigest()[:8], 16) % 2_000_000_000
     return s
 
 
 # ---------------------------------------------------------------- judge
 JUDGE = """You are a strict editor for a viral Hindi story channel (YouTube Shorts / Reels, 13+ audience).
-Score each candidate from 1-10 on: hook (would a scroller stop in 2 seconds?), twist (surprising yet fair?),
+Score each candidate from 1-10 on: hook (would a scroller stop in 2 seconds?), curiosity (does every scene make
+you need the next one - an open question that is only answered at the end?), twist (surprising yet fair?),
 clarity (easy to follow by ear?). Also set safe=false if anything is gory, sexual, hateful or dangerous to copy,
 and original=false if it copies or closely resembles any known film, cartoon, book or famous character.
 
 {cands}
 
-Return ONLY JSON: {{"scores": [{{"hook": 0, "twist": 0, "clarity": 0, "safe": true, "original": true, "note": "..."}}]}}
+Return ONLY JSON: {{"scores": [{{"hook": 0, "curiosity": 0, "twist": 0, "clarity": 0, "safe": true, "original": true, "note": "..."}}]}}
 (one entry per candidate, same order)"""
 
 
@@ -268,10 +292,10 @@ def judge(cands):
         return 0, {}
     best, best_v = 0, -1
     for i, s in enumerate(sc[:len(cands)]):
-        v = sum(float(s.get(k, 0) or 0) for k in ("hook", "twist", "clarity"))
+        v = sum(float(s.get(k, 0) or 0) for k in ("hook", "curiosity", "twist", "clarity"))
         if s.get("safe") is False or s.get("original") is False:
             v = -1
-        log(f"  candidate {i + 1}: hook {s.get('hook')} twist {s.get('twist')} clarity {s.get('clarity')} "
+        log(f"  candidate {i + 1}: hook {s.get('hook')} curiosity {s.get('curiosity')} twist {s.get('twist')} clarity {s.get('clarity')} "
             f"safe {s.get('safe')} original {s.get('original')} - {str(s.get('note', ''))[:100]}")
         if v > best_v:
             best, best_v = i, v
@@ -318,21 +342,33 @@ def pending_part2(history):
 
 
 # ---------------------------------------------------------------- public
-def write(history, theme=None, series=False, candidates=2):
-    """Generates `candidates` valid stories, judges them and returns the best one."""
-    theme = theme or pick_theme(history)
-    base = build_prompt(theme, history, series)
-    log(f"✍️ Writing {'a 2-part series' if series else 'a story'} - theme '{theme}'")
+def write(history, theme=None, series=False, candidates=2, length="mid", variety=None, direction=None, bank=(),
+          hook_type=None):
+    """Generates `candidates` valid, never-seen-before stories, judges them and returns the best one.
+    variety: variety.pick() choices; direction: the owner's chosen premise/note; bank: similarity bank."""
+    theme = theme or (direction or {}).get("theme") or pick_theme(history)
+    v = variety or V.pick(history)
+    base = build_prompt(theme, history, series, length, v, direction)
+    if hook_type in HOOK_TYPES:                                  # experiment engine's preferred hook style
+        base += f"\nUse hook_type '{hook_type}' for this story's hook."
+    log(f"✍️ Writing {'a 2-part series' if series else f'a {length} story'} - theme '{theme}', structure "
+        f"'{v['structure']}', style '{v['style']}'" + (" - owner's idea" if direction else ""))
     cands = []
     for c in range(candidates):
         prompt, last = base, None
         for attempt in range(3):
             try:
                 raw = llm.generate_json(prompt, temperature=0.95 - 0.1 * c)
-                s = validate(raw, history, series)
+                s = validate(raw, history, series, length)
+                ok, sim, closest, emb = similarity.check(s["premise"], list(bank) + [
+                    {"premise": x["premise"], "kind": x["_emb"][0], "vec": x["_emb"][1]} for x in cands])
+                if not ok:
+                    raise ValueError(f"premise is {sim:.2f} similar to an earlier story ({closest[:80]}) - "
+                                     "invent a completely different idea, world, characters and twist")
+                s["_emb"], s["similarity"] = emb, round(sim, 3)
                 s["theme"], s["series"] = theme, series
                 cands.append(s)
-                log(f"  candidate {len(cands)} ok ({llm.LAST}): {s['title']}")
+                log(f"  candidate {len(cands)} ok ({llm.LAST}, max similarity {sim:.2f}): {s['title']}")
                 break
             except ValueError as e:
                 last = e
@@ -341,12 +377,25 @@ def write(history, theme=None, series=False, candidates=2):
         if last and len(cands) <= c:
             log(f"  candidate {c + 1} gave up: {last}")
     if not cands:
-        raise RuntimeError("the AI writer could not produce a valid story")
+        raise RuntimeError("the AI writer could not produce a valid, original story")
     idx, scores = judge(cands) if len(cands) > 1 else (0, {})
-    best = cands[idx]
+    best = finish(cands[idx], v, length, direction)
     best["scores"] = scores
     log(f"🏆 Chosen: {best['title']}")
     return best
+
+
+def finish(s, v, length="mid", direction=None):
+    """Applies the chosen variety (style bible, voice...) and length to a validated story."""
+    s["variety"] = v
+    s["style_bible"] = (V.STYLES.get(v.get("style"), C.STYLE_BIBLE) +
+                        ("; " + s["mood_line"] if s.get("mood_line") else "") + ", vertical 9:16 composition")
+    s["voice"] = V.voice_for(v, s.get("narrator"))
+    s["length"] = length
+    s["max_seconds"] = LENGTHS.get(length, LENGTHS["mid"])[5]
+    if direction:
+        s["direction"] = {k: direction.get(k) for k in ("id", "by", "note", "premise", "idea")}
+    return s
 
 
 def dramatic_scene(scenes):
@@ -358,11 +407,12 @@ def dramatic_scene(scenes):
 def make_parts(s):
     """Turns a story into the list of videos it becomes (1 video, or Part 1 + Part 2 for a series)."""
     common = {k: s.get(k) for k in ("characters", "style_bible", "seed", "theme", "hook_type", "premise", "narrator",
-                                    "moral", "cta_question", "summary_hi")}
+                                    "moral", "cta_question", "summary_hi", "variety", "voice", "length",
+                                    "max_seconds", "direction", "similarity")}
     sid = "s" + hashlib.sha1(s["premise"].encode()).hexdigest()[:8]
     if not s.get("series"):
         return [dict(common, title=s["title"], hook=s["hook"], scenes=s["scenes"], twist_scene=s["twist_scene"],
-                     part=None, series_id=None, end_card="cta")]
+                     part=None, series_id=None, end_card=(s.get("variety") or {}).get("end", "cta_a"))]
     tw = s["twist_scene"]
     p1 = s["scenes"][:tw - 1]
     cliff = p1[-1]
@@ -372,7 +422,8 @@ def make_parts(s):
     t2 = s.get("part2_title") or s["title"]
     return [dict(common, title=s["title"], hook=s["hook"], scenes=p1, twist_scene=None, part=1, series_id=sid,
                  end_card="part2", series_title=s["title"]),
-            dict(common, title=t2, hook=t2, scenes=p2, twist_scene=2, part=2, series_id=sid, end_card="cta",
+            dict(common, title=t2, hook=t2, scenes=p2, twist_scene=2, part=2, series_id=sid,
+                 end_card=(s.get("variety") or {}).get("end", "cta_a"),
                  series_title=s["title"])]
 
 
@@ -444,6 +495,6 @@ def sample():
     for i, x in enumerate(s["scenes"]):
         x.update(id=i + 1, seconds=6)
         x.setdefault("speaker", "narrator")
-    s = validate(s, ())
+    s = validate(s, (), length="long")
     s["theme"], s["series"] = "village_legend", False
-    return s
+    return finish(s, V.pick([]), "long")

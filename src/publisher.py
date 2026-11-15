@@ -1,209 +1,183 @@
 """The ONLY code path that publishes. Shared by the generator (main.py) and the poster workflow (post_pending.py).
 
 Guarantees:
-  * posts at the slot time (sleeps until it if the job started early - GitHub cron is often late or skipped)
-  * never posts twice: a storage claim-lock + a check of each account's latest posts
-  * per-platform progress is saved the moment a platform succeeds, so a retry only does the platform that is
-    still missing (Instagram and YouTube are never re-posted)
-  * history is written only after the posts went out, so a failed/skipped day never burns a story or series part
-  * every failure sends a clear Telegram message saying what is posted, what is not, and what happens next
+  * each queue item (one platform, one slot) posts at its slot time - the job sleeps until then when it is close
+  * review rules: approve (✅ Post button; with APPROVAL_TIMEOUT it also posts at the slot when you did not answer),
+    auto_unless_skip, auto. 🗑 Skip drops the slot, 🔁 Remake makes a new video for it at the next production run
+  * never posts twice: a per-item claim lock + a check of the account's latest posts
+  * history is written only after a successful post; every failure sends a clear Telegram message
 """
-import os, tempfile, time, uuid, traceback, requests
-import config as C, storage, instagram, notify, slots, youtube
+import os, re, tempfile, time, traceback, requests
+import config as C, storage, instagram, notify, slots, youtube, postqueue
 from util import log, redact
 
 MAX_ATTEMPTS = 3
-CLAIM_TTL = 20 * 60
-NAMES = {"ig": "Instagram", "yt": "YouTube"}
+NAMES = {"ig": "Instagram", "yt": "YouTube Shorts", "ytlong": "YouTube"}
 
 
-def targets():
-    out = []
-    if C.ig_enabled():
-        out.append("ig")
-    if youtube.enabled():
-        out.append("yt")
-    return out
-
-
-def due_at(p):
-    t = float(p.get("post_at") or p.get("created_ts") or 0)
-    if C.REVIEW_MODE == "auto_unless_skip":
-        t = max(t, float(p.get("created_ts", 0)) + C.REVIEW_HOURS * 3600)
+def due_at(it):
+    t = float(it.get("post_at") or it.get("created_ts") or 0)
+    if C.review_mode() == "auto_unless_skip":
+        t = max(t, float(it.get("created_ts", 0)) + C.REVIEW_HOURS * 3600)
     return t
 
 
-def _command(p):
-    try:
-        return notify.latest_command(int(p.get("created_ts", 0)))
-    except Exception as e:
-        log("Telegram command check failed (ignored):", e)
-        return None
-
-
-def _record(p):
+def _record(it, kind="story", media=None):
     history = storage.get_json("history.json", [])
-    done = p.get("done", {})
     history.append({
-        "slot": p.get("slot"), "kind": "story", "title": p.get("title"), "theme": p.get("theme"),
-        "hook": p.get("hook", ""), "hook_type": p.get("hook_type"), "premise": p.get("premise"),
-        "part": p.get("part"), "series_id": p.get("series_id"), "series_title": p.get("series_title"),
-        "duration": p.get("duration"), "media_id": done.get("ig"), "youtube_id": done.get("yt"),
-        "posted_ts": int(time.time()), "seq": p.get("seq"),
+        "slot": it["id"], "platform": it.get("platform"), "kind": kind, "title": it.get("title"),
+        "theme": it.get("theme"), "hook": it.get("hook", ""), "hook_type": it.get("hook_type"),
+        "premise": it.get("premise"), "part": it.get("part"), "series_id": it.get("series_id"),
+        "series_title": it.get("series_title"), "duration": it.get("duration"), "variety": it.get("variety"),
+        "length": it.get("length"), "direction_by": (it.get("direction") or {}).get("by"),
+        "approval": it.get("approval"), "story_end": it.get("story_end"), "video_key": it.get("video_key"),
+        "cover_t": it.get("cover_t"), "seq": it.get("seq"), "posted_ts": int(time.time()),
+        "cta_question": it.get("cta_question"), "moral": it.get("moral"), "summary_hi": it.get("summary_hi"),
+        "narrator": it.get("narrator"),
+        "media_id": media if it.get("platform") == "ig" else None,
+        "youtube_id": media if it.get("platform") in ("yt", "ytlong") else None,
     })
-    storage.put_json("history.json", history[-500:])
+    storage.put_json("history.json", history[-800:])
 
 
-def _claim(slot_key):
-    """Optimistic lock in Supabase so two overlapping jobs can't both publish."""
-    cur = storage.get_json("pending.json", None)
-    if not cur or cur.get("slot") != slot_key:
-        log("Pending video changed or already handled by another job.")
-        return None
-    if cur.get("status") == "publishing" and time.time() - cur.get("claim_ts", 0) < CLAIM_TTL:
-        log("Another job is publishing this video right now - leaving it to that job.")
-        return None
-    me = uuid.uuid4().hex
-    cur.update(status="publishing", claim=me, claim_ts=int(time.time()))
-    storage.put_json("pending.json", cur)
-    time.sleep(5)
-    back = storage.get_json("pending.json", None)
-    if not back or back.get("claim") != me:
-        log("Lost the publish lock to another job.")
-        return None
-    return back
-
-
-def _save(p):
-    storage.put_json("pending.json", p)
-
-
-def _post_ig(p):
-    mid = instagram.already_posted(p["caption"])
-    if mid:
-        log("Already on Instagram - not posting again.")
+def _post(it):
+    plat = it.get("platform", "ig")
+    if plat == "ig":
+        mid = instagram.already_posted(it["caption"])
+        if mid:
+            log("Already on Instagram - not posting again.")
+            return mid
+        mid = instagram.post_reel(it["video_url"], it["caption"], it.get("cover_url"))
+        if it.get("story_url"):
+            try:
+                instagram.post_story(it["story_url"])
+                log("Shared to Instagram Stories")
+            except Exception as e:
+                log("Story share skipped:", e)
         return mid
-    return instagram.post_reel(p["video_url"], p["caption"], p.get("cover_url"))
-
-
-def _post_yt(p):
-    meta = p["yt_meta"]
+    meta = it["yt_meta"]
     vid = youtube.already_posted(meta["snippet"]["title"])
     if vid:
         log("Already on YouTube - not uploading again.")
         return vid
-    vid = youtube.upload(p["video_url"], meta)
-    p.setdefault("done", {})["yt"] = vid
-    _save(p)                                              # saved before the optional extras below
-    youtube.add_to_playlist(vid, *youtube.MAIN_PLAYLIST)
-    if p.get("series_id"):
-        youtube.add_to_playlist(vid, f"{C.CHANNEL}: {p.get('series_title', '')}"[:150],
-                                "Is series ke saare parts ek jagah.")
-    if p.get("cover_url"):
+    vid = youtube.upload(it["video_url"], meta)
+    postqueue.update(it["id"], done=vid)                     # durable before the optional extras below
+    for title, desc in it.get("playlists") or []:
+        youtube.add_to_playlist(vid, title, desc)
+    if it.get("yt_comment"):
+        youtube.comment(vid, it["yt_comment"])
+    if it.get("cover_url") and plat == "ytlong":
         try:
-            jpg = os.path.join(tempfile.mkdtemp(), "cover.jpg")
+            jpg = os.path.join(tempfile.mkdtemp(), "thumb.jpg")
             with open(jpg, "wb") as f:
-                f.write(requests.get(p["cover_url"], timeout=60).content)
+                f.write(requests.get(it["cover_url"], timeout=60).content)
             youtube.set_thumbnail(vid, jpg)
         except Exception as e:
             log("Thumbnail skipped:", e)
     return vid
 
 
-def _links(done):
-    out = []
-    if done.get("ig"):
-        out.append("📸 Instagram Reel posted")
-    if done.get("yt"):
-        out.append(f"▶️ https://youtube.com/shorts/{done['yt']}")
-    return "\n".join(out)
+def _link(it, mid):
+    if it.get("platform") == "ig":
+        return "📸 Instagram Reel posted"
+    return f"▶️ https://youtube.com/{'shorts/' if it.get('platform') == 'yt' else 'watch?v='}{mid}"
 
 
-def publish(p, force=False):
-    if p.get("attempts", 0) >= MAX_ATTEMPTS and not force:
-        log("Too many failed attempts; run 'Post queued video' manually with force_post = true.")
+def publish(it, force=False):
+    if it.get("attempts", 0) >= MAX_ATTEMPTS and not force:
         return "gave_up"
-    p = _claim(p.get("slot"))
-    if not p:
+    it = postqueue.claim(it["id"])
+    if not it:
         return "busy"
-    want = p.get("platforms") or targets()
-    if not want:
-        notify.text("❌ No platform is connected (set the Instagram and/or YouTube secrets). Nothing was posted.")
-        p["status"] = "queued"; p.pop("claim", None); _save(p)
-        return "no_platforms"
-    done = p.setdefault("done", {})
-    errors = {}
-    for plat in want:
-        if done.get(plat):
-            continue
+    if it.get("done"):
+        mid = it["done"]
+    else:
         try:
-            done[plat] = _post_ig(p) if plat == "ig" else _post_yt(p)
-            _save(p)                                     # progress is durable: a retry never re-posts this platform
+            mid = _post(it)
         except Exception:
-            errors[plat] = redact(traceback.format_exc()[-900:])
-            log(errors[plat])
-    if errors:
-        p["attempts"] = p.get("attempts", 0) + 1
-        p["status"] = "queued"; p.pop("claim", None)
-        ok = [NAMES[k] for k in want if done.get(k)]
-        bad = ", ".join(NAMES[k] for k in errors)
-        last = p["attempts"] >= MAX_ATTEMPTS
-        state = (f"✅ Already live on: {', '.join(ok)} (will NOT be posted again)\n" if ok else "Nothing is live yet.\n")
-        nxt = ("Giving up on it. Fix the problem, then run 'Post queued video' with force_post = true."
-               if last else f"I will retry only {bad} on the next run ({p['attempts']}/{MAX_ATTEMPTS}).")
-        if last and ok:                                  # live on one platform: keep the story/series history right
-            nxt = (f"Giving up on {bad}. Recorded as posted on {', '.join(ok)} only; the video and its metadata are "
-                   f"kept in storage as failed/{p.get('slot')}.json so you can upload it to {bad} by hand.")
-            _record(p)
-            storage.put_json(f"failed/{p.get('slot')}.json", p)
-            storage.delete("pending.json")
-        else:
-            _save(p)
-        notify.text(f"❌ Posting to {bad} failed: {p.get('title', '')}\n{state}{nxt}\n\n" +
-                    "\n\n".join(f"{NAMES[k]}: {v[-600:]}" for k, v in errors.items()))
-        if not ok:
-            raise RuntimeError(f"publish failed on {bad}")
-        return "partial"
-    _record(p)
-    storage.delete("pending.json")
-    notify.text(f"✅ Posted ({slots.fmt(time.time())}): {p.get('title', '')}\n{_links(done)}")
+            err = redact(traceback.format_exc()[-900:]); log(err)
+            it["attempts"] = it.get("attempts", 0) + 1
+            name = NAMES.get(it.get("platform"), it.get("platform"))
+            if it["attempts"] >= MAX_ATTEMPTS:
+                storage.put_json(f"failed/{it['id']}.json", it)
+                postqueue.delete(it["id"])
+                notify.text(f"❌ {name}: giving up on '{it.get('title')}' after {MAX_ATTEMPTS} tries. Nothing was posted "
+                            f"for this slot. Data kept as failed/{it['id']}.json.\n\n{err[-600:]}")
+            else:
+                postqueue.release(it)
+                notify.text(f"❌ {name} posting failed ({it['attempts']}/{MAX_ATTEMPTS}): {it.get('title')}\n"
+                            f"Nothing was posted. I retry on the next run.\n\n{err[-600:]}")
+            return "failed"
+    _record(it, media=mid)
+    postqueue.delete(it["id"])
+    notify.text(f"✅ Posted ({slots.fmt(time.time())}): {it.get('title', '')}\n{_link(it, mid)}")
     return "posted"
 
 
-def run(force=False, wait=True):
-    """Post the pending video if it is due (sleeping until the slot when it is close). Returns a status string."""
-    p = storage.get_json("pending.json", None)
-    if not p:
-        log("Nothing pending.")
-        return "nothing"
-    if force:
-        return publish(p, force=True)
+def decide(it, force=False):
+    """'post' | 'wait' | 'skip' | 'redo' for one queue item right now."""
+    a = it.get("approval")
+    if a == "skipped":
+        return "skip"
+    if a == "redo":
+        return "redo"
+    if force or it.get("done"):
+        return "post"
+    if time.time() < due_at(it):
+        return "wait"
+    mode = C.review_mode()
+    if mode == "approve" and a not in ("approved", "auto"):
+        return "post_timeout" if C.APPROVAL_TIMEOUT else "wait_approval"
+    return "post"
 
+
+def run(force=False, wait=True):
+    """Posts every due queue item (sleeping until the next slot when it is close). Returns a status string."""
+    import director
+    last = "nothing"
     while True:
-        cmd = _command(p)
-        if cmd == "skip":
-            if p.get("done") and any(p["done"].values()):
-                notify.text("⚠️ /skip ignored: this video is already live on one platform; finishing the other one.")
+        try:
+            director.poll()                                    # see button taps before deciding
+        except Exception as e:
+            log("Telegram poll failed (ignored):", e)
+        items = [i for i in postqueue.items() if C.PLATFORM in ("both", i.get("platform"))
+                 or (C.PLATFORM == "yt" and i.get("platform") == "ytlong")]
+        if not items:
+            log("Nothing queued.")
+            return last
+        next_due = None
+        for it in items:
+            what = decide(it, force)
+            if what == "skip":
+                _record(it, kind="skip")
+                postqueue.delete(it["id"])
+                notify.text(f"🗑️ Skipped: {it.get('title', it['id'])} (nothing posted for {it['id']})")
+                last = "skipped"
+            elif what == "redo":
+                postqueue.delete(it["id"])
+                notify.text(f"🔁 '{it.get('title')}' discarded - a new video for {slots.fmt(it['post_at'])} is made at "
+                            f"the next production run (every 2 hours).")
+                last = "redo"
+            elif what in ("post", "post_timeout"):
+                if what == "post_timeout":
+                    it["approval"] = "auto"
+                    postqueue.update(it["id"], approval="auto")
+                    import director as D
+                    D.log_decision("video", it["id"], "auto-posted", by="auto", note="no answer before the slot")
+                    notify.edit(it.get("tg_msg"), buttons=[])
+                last = publish(it, force)
+            elif what == "wait_approval":
+                log(f"{it['id']}: waiting for your ✅ Post in Telegram.")
+                last = "awaiting_approval"
             else:
-                storage.delete("pending.json")
-                notify.text(f"🗑️ Discarded: {p.get('title', 'pending video')}")
-                return "skipped"
-        if cmd == "post_now":
-            return publish(p)
-        partly_live = p.get("done") and any(p["done"].values())
-        if C.REVIEW_MODE == "approve" and C.TELEGRAM_COMMANDS and cmd != "post" and not partly_live:
-            log(f"Waiting for your /post in Telegram (slot {slots.fmt(due_at(p))}).")
-            return "awaiting_approval"
-        wait_s = due_at(p) - time.time()
-        if wait_s <= 0:
-            return publish(p)
-        if not wait or wait_s > C.MAX_WAIT_MINUTES * 60:
-            log(f"Not due yet - scheduled for {slots.fmt(due_at(p))} ({wait_s/3600:.1f} h from now).")
-            return "not_due"
-        nap = min(wait_s, 600)                     # wake every <=10 min to honour a late /skip
-        log(f"Sleeping {nap/60:.1f} min - posting at {slots.fmt(due_at(p))}.")
+                d = due_at(it)
+                next_due = d if next_due is None else min(next_due, d)
+        if force or not wait or next_due is None:
+            return last
+        wait_s = next_due - time.time()
+        if wait_s > C.MAX_WAIT_MINUTES * 60:
+            log(f"Next post {slots.fmt(next_due)} ({wait_s / 3600:.1f} h from now) - not waiting.")
+            return last if last != "nothing" else "not_due"
+        nap = max(5, min(wait_s, 600))                          # wake every <=10 min to see taps
+        log(f"Sleeping {nap / 60:.1f} min - next post at {slots.fmt(next_due)}.")
         time.sleep(nap)
-        p = storage.get_json("pending.json", None)
-        if not p:
-            log("Pending video was handled elsewhere while waiting.")
-            return "nothing"
