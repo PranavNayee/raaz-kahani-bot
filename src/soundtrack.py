@@ -199,7 +199,21 @@ def loudnorm(src, dst, target=None):
             af += (f":measured_I={j['input_i']}:measured_TP={j['input_tp']}:measured_LRA={j['input_lra']}"
                    f":measured_thresh={j['input_thresh']}:offset={j['target_offset']}:linear=true")
     subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", src, "-af", af, "-ar", "48000", "-ac", "2", dst], check=True)
-    return measure(dst)
+    got = measure(dst)
+    if got is None or abs(got - target) > 1.0:
+        # linear mode can't raise the level past loud effect peaks: exact gain + a true-peak limiter, re-measured
+        log(f"   linear loudness gave {got} LUFS - applying measured gain with a peak limiter")
+        src_lufs = measure(src)
+        gain = target - (src_lufs if src_lufs is not None else target)
+        for _ in range(4):
+            subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", src, "-af",
+                            f"volume={gain:.2f}dB,alimiter=limit=0.84:attack=1:release=50:level=disabled",
+                            "-ar", "48000", "-ac", "2", dst], check=True)
+            got = measure(dst)
+            if got is None or abs(got - target) <= 0.5:
+                break
+            gain += target - got                       # the limiter ate some loudness: push a bit more
+    return got
 
 
 def measure(path):
